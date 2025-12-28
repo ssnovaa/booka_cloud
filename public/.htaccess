@@ -1,0 +1,36 @@
+<IfModule mod_deflate.c>
+  # ВАЖНО: не сжимаем ответы на /audio/* и файлы аудио-типов (иначе ломается Range)
+  SetEnvIfNoCase Request_URI "^/audio/" no-gzip
+  SetEnvIfNoCase Request_URI "\.(mp3|m4a|aac|ogg)$" no-gzip
+</IfModule>
+
+<IfModule mod_brotli.c>
+  SetEnvIfNoCase Request_URI "^/audio/" no-brotli
+  SetEnvIfNoCase Request_URI "\.(mp3|m4a|aac|ogg)$" no-brotli
+</IfModule>
+
+<IfModule mod_rewrite.c>
+    <IfModule mod_negotiation.c>
+        Options -MultiViews -Indexes
+    </IfModule>
+
+    RewriteEngine On
+
+    # Handle Authorization Header (корректно передаёт Bearer в PHP)
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Handle X-XSRF-Token Header (если SPA — пригодится)
+    RewriteCond %{HTTP:x-xsrf-token} .
+    RewriteRule .* - [E=HTTP_X_XSRF_TOKEN:%{HTTP:X-XSRF-Token}]
+
+    # Redirect Trailing Slashes If Not A Folder...
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_URI} (.+)/$
+    RewriteRule ^ %1 [L,R=301]
+
+    # Send Requests To Front Controller...
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [L]
+</IfModule>
