@@ -8,11 +8,14 @@ use App\Models\Listen;
 use App\Models\ABook;
 use App\Models\AChapter;
 use App\Models\ListenLog;
-use Illuminate\Support\Carbon; // 🟢 Додано для роботи з датами
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage; // Добавлено для работы с R2
 
 class ListenController extends Controller
 {
-    // ... index() та get() залишаються без змін ...
+    /**
+     * Получить последнюю позицию прослушивания пользователя.
+     */
     public function index(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -51,6 +54,9 @@ class ListenController extends Controller
         ]);
     }
 
+    /**
+     * Получить позицию прослушивания для конкретной главы.
+     */
     public function get(Request $request): JsonResponse
     {
         $request->validate([
@@ -78,6 +84,9 @@ class ListenController extends Controller
         ]);
     }
 
+    /**
+     * Обновить прогресс прослушивания и записать логи времени.
+     */
     public function update(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -92,13 +101,11 @@ class ListenController extends Controller
             'played'       => ['nullable','integer','min:0'],
         ]);
 
-        // Перевірка: глава дійсно належить цій книзі
         $chapter = AChapter::select('id','a_book_id','duration')->find($data['a_chapter_id']);
         if (!$chapter || (int) $chapter->a_book_id !== (int) $data['a_book_id']) {
-            return response()->json(['message' => 'Глава не належить вказаній книзі'], 422);
+            return response()->json(['message' => 'Глава не принадлежит этой книге'], 422);
         }
 
-        // Обмеження позиції тривалістю
         $position = (int) $data['position'];
         $duration = is_null($chapter->duration) ? null : max(0, (int) $chapter->duration);
         if ($duration !== null) {
@@ -107,7 +114,6 @@ class ListenController extends Controller
 
         $now = now();
 
-        // Знайти чи створити запис прослуховування
         $listen = Listen::where([
             'user_id'      => $user->id,
             'a_book_id'    => (int) $data['a_book_id'],
@@ -117,9 +123,7 @@ class ListenController extends Controller
         $prevPos = $listen?->position ?? 0;
         $prevAt  = $listen?->updated_at;
 
-        // Обчислення секунд для журналу
         $credited = 0;
-
         if (array_key_exists('played', $data) && $data['played'] !== null) {
             $played = max(0, (int) $data['played']);
             $cap = $prevAt ? $prevAt->diffInSeconds($now) + 10 : 3600;
@@ -132,7 +136,6 @@ class ListenController extends Controller
             }
         }
 
-        // Оновлення або створення Listen
         if ($listen) {
             $listen->position   = $position;
             $listen->updated_at = $now;
@@ -148,7 +151,6 @@ class ListenController extends Controller
             ]);
         }
 
-        // Запис у журнал
         if ($credited > 0) {
             ListenLog::create([
                 'user_id'      => $user->id,
@@ -159,7 +161,6 @@ class ListenController extends Controller
             ]);
         }
 
-        // 🔥 ВИПРАВЛЕННЯ: Перевіряємо реальну дату закінчення підписки, а не просто прапорець
         $isPaidValid = false;
         if ($user->paid_until) {
             $date = $user->paid_until instanceof Carbon 
@@ -175,7 +176,7 @@ class ListenController extends Controller
             'position'     => (int) $listen->position,
             'updated_at'   => $listen->updated_at,
             'credited'     => $credited,
-            'user_is_paid' => $isPaidValid, // 🟢 Тепер це динамічне значення
+            'user_is_paid' => $isPaidValid,
         ]);
     }
 
@@ -184,6 +185,10 @@ class ListenController extends Controller
         return $this->update($request);
     }
 
+    /**
+     * GET /api/listened-books
+     * Список прослушанных книг (позиция > 0).
+     */
     public function listenedBooks(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -200,15 +205,21 @@ class ListenController extends Controller
             ->whereIn('id', $listenedBookIds)
             ->get()
             ->map(function ($book) {
-                $cover = $book->cover_url;
-                if ($cover && !preg_match('~^https?://~i', $cover)) {
-                    $cover = url('/storage/' . ltrim($cover, '/'));
+                // 🔥 Исправлено: получаем чистую ссылку из БД и формируем S3 URL
+                $rawCover = $book->getRawOriginal('cover_url');
+                
+                $coverAbs = null;
+                if ($rawCover) {
+                    $coverAbs = str_starts_with($rawCover, 'http') 
+                        ? $rawCover 
+                        : Storage::disk('s3')->url($rawCover);
                 }
+
                 return [
                     'id'        => (int) $book->id,
                     'title'     => (string) $book->title,
                     'author'    => $book->author?->name ?? 'Невідомий',
-                    'cover_url' => $cover ?: asset('images/placeholder-book.png'),
+                    'cover_url' => $coverAbs, // Прямая ссылка на R2
                 ];
             })
             ->values();
