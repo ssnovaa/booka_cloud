@@ -6,17 +6,17 @@ use App\Http\Controllers\Controller;
 use App\Models\Series;
 use App\Models\ABook;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage; // Додано фасад Storage
 
 class SeriesApiController extends Controller
 {
     /**
      * GET /api/series
-     * Список серий для вкладки «Серії».
-     * Возвращаем краткую инфу + обложку первой книги серии.
+     * Список серій для вкладки «Серії».
+     * Повертаємо коротку інфу + обкладинку першої книги серії.
      */
     public function index(Request $request)
     {
-        // По желанию: пагинация
         $perPage = (int) $request->input('per_page', 20);
 
         $series = Series::withCount('books')
@@ -25,21 +25,28 @@ class SeriesApiController extends Controller
             ->withQueryString();
 
         $data = $series->getCollection()->map(function (Series $s) {
-            // первая книга серии (по id) — чтобы достать обложку
+            // Перша книга серії (по id) — щоб дістати обкладинку
             $first = $s->books()
                 ->orderBy('id')
                 ->select(['id','title','cover_url','thumb_url'])
                 ->first();
 
-            $firstCover = $first?->thumb_url ?? $first?->cover_url;
-            $firstCoverAbs = $firstCover ? url('/storage/' . ltrim($firstCover, '/')) : null;
+            // 🔥 ВИПРАВЛЕННЯ: отримуємо чистий шлях і генеруємо посилання на R2
+            $rawPath = $first?->getRawOriginal('thumb_url') ?? $first?->getRawOriginal('cover_url');
+            
+            $firstCoverAbs = null;
+            if ($rawPath) {
+                $firstCoverAbs = str_starts_with($rawPath, 'http') 
+                    ? $rawPath 
+                    : Storage::disk('s3')->url($rawPath);
+            }
 
             return [
                 'id'            => (int) $s->id,
                 'title'         => $s->title,
                 'description'   => $s->description,
                 'books_count'   => (int) $s->books_count,
-                'first_cover'   => $firstCoverAbs, // обложка для карточки серии
+                'first_cover'   => $firstCoverAbs, 
             ];
         });
 
@@ -54,7 +61,7 @@ class SeriesApiController extends Controller
 
     /**
      * GET /api/series/{id}/books
-     * Книги в серии — формат, совместимый с Book.fromJson в приложении.
+     * Книги в серії — формат, сумісний із Book.fromJson у додатку.
      */
     public function books($id, Request $request)
     {
@@ -64,10 +71,25 @@ class SeriesApiController extends Controller
             ->where('series_id', $s->id)
             ->orderBy('id');
 
-        // можно добавить пагинацию, но для простоты отдадим все
         $books = $query->get()->map(function (ABook $book) use ($s) {
-            $coverAbs = $book->cover_url ? url('/storage/' . ltrim($book->cover_url, '/')) : null;
-            $thumbAbs = $book->thumb_url ? url('/storage/' . ltrim($book->thumb_url, '/')) : null;
+            
+            // 🔥 ВИПРАВЛЕННЯ: генеруємо посилання на R2 для книг серії
+            $rawCover = $book->getRawOriginal('cover_url');
+            $rawThumb = $book->getRawOriginal('thumb_url');
+
+            $coverAbs = null;
+            if ($rawCover) {
+                $coverAbs = str_starts_with($rawCover, 'http') 
+                    ? $rawCover 
+                    : Storage::disk('s3')->url($rawCover);
+            }
+
+            $thumbAbs = null;
+            if ($rawThumb) {
+                $thumbAbs = str_starts_with($rawThumb, 'http') 
+                    ? $rawThumb 
+                    : Storage::disk('s3')->url($rawThumb);
+            }
 
             return [
                 'id'          => (int) $book->id,
@@ -75,7 +97,7 @@ class SeriesApiController extends Controller
                 'author'      => $book->author?->name,
                 'reader'      => $book->reader?->name,
                 'description' => $book->description,
-                'duration'    => (string) $book->duration, // фронт ждёт строку
+                'duration'    => (string) $book->duration,
                 'cover_url'   => $coverAbs,
                 'thumb_url'   => $thumbAbs,
                 'genres'      => $book->genres->pluck('name')->values(),
