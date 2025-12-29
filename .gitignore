@@ -7,3 +7,7 @@ storage/*.key
 .idea/
 .vscode/
 *.log
+
+storage/*.json
+
+storage/keys/

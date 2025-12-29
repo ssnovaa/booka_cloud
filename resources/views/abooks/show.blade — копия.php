@@ -60,8 +60,7 @@
 
   {{-- Обложка --}}
   @if($book->cover_url)
-    {{-- ИСПРАВЛЕНО: используем Storage::url вместо asset --}}
-    <img src="{{ \Illuminate\Support\Facades\Storage::url($book->cover_url) }}"
+    <img src="{{ asset('storage/'.$book->cover_url) }}"
          alt="Обложка" class="w-64 mb-6 rounded shadow">
   @endif
 

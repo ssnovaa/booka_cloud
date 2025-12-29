@@ -5,8 +5,7 @@
     <div class="relative w-44 h-64 overflow-hidden mx-auto rounded-t-lg bg-white">
         @if ($book->cover_url)
             <a href="{{ route('abooks.show', $book->id) }}" class="block relative z-10">
-                {{-- ИСПРАВЛЕНО: используем Storage::url вместо asset --}}
-                <img src="{{ \Illuminate\Support\Facades\Storage::url($book->cover_url) }}"
+                <img src="{{ asset('storage/' . $book->cover_url) }}"
                      alt="Обложка книги {{ $book->title }}"
                      class="w-full h-full object-cover object-center">
             </a>
