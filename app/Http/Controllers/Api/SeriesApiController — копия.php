@@ -6,16 +6,17 @@ use App\Http\Controllers\Controller;
 use App\Models\Series;
 use App\Models\ABook;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage; // 👈 ВАЖНО: Добавили фасад Storage
 
 class SeriesApiController extends Controller
 {
     /**
      * GET /api/series
      * Список серий для вкладки «Серії».
+     * Возвращаем краткую инфу + обложку первой книги серии.
      */
     public function index(Request $request)
     {
+        // По желанию: пагинация
         $perPage = (int) $request->input('per_page', 20);
 
         $series = Series::withCount('books')
@@ -24,29 +25,21 @@ class SeriesApiController extends Controller
             ->withQueryString();
 
         $data = $series->getCollection()->map(function (Series $s) {
-            // Первая книга серии — чтобы достать обложку
+            // первая книга серии (по id) — чтобы достать обложку
             $first = $s->books()
                 ->orderBy('id')
                 ->select(['id','title','cover_url','thumb_url'])
                 ->first();
 
             $firstCover = $first?->thumb_url ?? $first?->cover_url;
-
-            // 🔥 ИСПРАВЛЕНИЕ 1: Генерируем ссылку на облако (S3/R2)
-            $firstCoverAbs = null;
-            if ($firstCover) {
-                // Если ссылка уже полная (http) — оставляем, иначе генерируем через диск s3
-                $firstCoverAbs = str_starts_with($firstCover, 'http') 
-                    ? $firstCover 
-                    : Storage::disk('s3')->url($firstCover);
-            }
+            $firstCoverAbs = $firstCover ? url('/storage/' . ltrim($firstCover, '/')) : null;
 
             return [
                 'id'            => (int) $s->id,
                 'title'         => $s->title,
                 'description'   => $s->description,
                 'books_count'   => (int) $s->books_count,
-                'first_cover'   => $firstCoverAbs, 
+                'first_cover'   => $firstCoverAbs, // обложка для карточки серии
             ];
         });
 
@@ -61,6 +54,7 @@ class SeriesApiController extends Controller
 
     /**
      * GET /api/series/{id}/books
+     * Книги в серии — формат, совместимый с Book.fromJson в приложении.
      */
     public function books($id, Request $request)
     {
@@ -70,22 +64,10 @@ class SeriesApiController extends Controller
             ->where('series_id', $s->id)
             ->orderBy('id');
 
+        // можно добавить пагинацию, но для простоты отдадим все
         $books = $query->get()->map(function (ABook $book) use ($s) {
-            
-            // 🔥 ИСПРАВЛЕНИЕ 2: Тоже меняем на облачные ссылки
-            $coverAbs = null;
-            if ($book->cover_url) {
-                $coverAbs = str_starts_with($book->cover_url, 'http') 
-                    ? $book->cover_url 
-                    : Storage::disk('s3')->url($book->cover_url);
-            }
-
-            $thumbAbs = null;
-            if ($book->thumb_url) {
-                $thumbAbs = str_starts_with($book->thumb_url, 'http') 
-                    ? $book->thumb_url 
-                    : Storage::disk('s3')->url($book->thumb_url);
-            }
+            $coverAbs = $book->cover_url ? url('/storage/' . ltrim($book->cover_url, '/')) : null;
+            $thumbAbs = $book->thumb_url ? url('/storage/' . ltrim($book->thumb_url, '/')) : null;
 
             return [
                 'id'          => (int) $book->id,
@@ -93,7 +75,7 @@ class SeriesApiController extends Controller
                 'author'      => $book->author?->name,
                 'reader'      => $book->reader?->name,
                 'description' => $book->description,
-                'duration'    => (string) $book->duration,
+                'duration'    => (string) $book->duration, // фронт ждёт строку
                 'cover_url'   => $coverAbs,
                 'thumb_url'   => $thumbAbs,
                 'genres'      => $book->genres->pluck('name')->values(),
