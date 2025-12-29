@@ -13,7 +13,7 @@ class AudioStreamController extends Controller
 {
     public function stream(Request $request, $id)
     {
-        // 1. --- Авторизация ---
+        // 1. --- Авторизация (Ваш код) ---
         if ($token = $request->bearerToken()) {
             if ($pat = PersonalAccessToken::findToken($token)) {
                 if ($pat->tokenable) {
@@ -29,31 +29,46 @@ class AudioStreamController extends Controller
             abort(404, 'Глава не найдена');
         }
 
-        // 3. --- Логика доступа (ИСПРАВЛЕНО) ---
-        // Находим самый маленький номер порядка (order) для этой книги
-        $minOrder = AChapter::where('a_book_id', $chapter->a_book_id)->min('order');
+        // 3. --- ВАША ОРИГИНАЛЬНАЯ ЛОГИКА ЗАЩИТЫ ---
+        // Ищем первую главу именно так, как было у вас
+        $firstChapter = AChapter::where('a_book_id', $chapter->a_book_id)
+            ->orderBy('order')
+            ->first();
 
-        // Если у текущей главы порядок больше минимального — значит это не первая глава.
-        // И если пользователь не вошел в систему — блокируем.
-        if ($chapter->order > $minOrder && !Auth::check()) {
+        // Проверка: если это не первая глава по ID и нет авторизации — 403
+        if (optional($firstChapter)->id !== $chapter->id && !Auth::check()) {
             abort(403, 'Доступ только для зарегистрированных пользователей');
         }
 
-        // 4. --- Генерация ссылки R2 ---
+        // 4. --- ПОЛУЧЕНИЕ ФАЙЛА ИЗ ПРИВАТНОГО ОБЛАКА ---
         $filePath = ltrim($chapter->audio_path, '/\\');
+        $disk = Storage::disk('s3_private');
 
-        try {
-            // Генерируем ссылку на 2 часа
-            $url = Storage::disk('s3_private')->temporaryUrl(
-                $filePath,
-                now()->addMinutes(120)
-            );
-        } catch (\Exception $e) {
-            Log::error("Ошибка генерации ссылки S3: " . $e->getMessage());
-            abort(500, 'Ошибка доступа к хранилищу');
+        if (!$disk->exists($filePath)) {
+            abort(404, 'Файл не найден в хранилище');
         }
 
-        // 5. --- Редирект на Cloudflare ---
-        return redirect($url);
+        // 5. --- СТРИМИНГ (Скрываем URL облака) ---
+        // Мы не делаем редирект. Мы читаем файл из облака и отдаем его пользователю от имени сайта.
+        // Это полностью эмулирует поведение "private storage" на локальном диске.
+        
+        $fileSize = $disk->size($filePath);
+        $mimeType = $disk->mimeType($filePath) ?? 'audio/mpeg';
+
+        $headers = [
+            'Content-Type'        => $mimeType,
+            'Content-Length'      => $fileSize,
+            'Accept-Ranges'       => 'bytes',
+            'Content-Disposition' => 'inline; filename="' . basename($filePath) . '"',
+        ];
+
+        return response()->stream(function () use ($disk, $filePath) {
+            // Открываем поток к облаку и передаем данные клиенту
+            $stream = $disk->readStream($filePath);
+            fpassthru($stream);
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }, 200, $headers);
     }
 }
