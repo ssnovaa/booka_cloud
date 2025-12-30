@@ -13,21 +13,10 @@ class UserApiController extends Controller
 {
     /**
      * Профиль пользователя + актуальное «текущее прослушивание».
-     *
-     * Возвращает:
-     * - основные поля пользователя (id, name, email, is_paid, paid_until)
-     * - free_seconds — точный остаток в секундах (listen_credits.seconds_left или minutes*60)
-     * - free_minutes — то же, intdiv(free_seconds, 60) для удобства клиентов
-     * - favorites, listened — плоские списки с author, cover_url, thumb_url и duration
-     * - current_listen: book_id, chapter_id, position, updated_at + вложенные book и chapter
-     * - server_time — текущее время сервера (ISO8601, UTC)
-     *
-     * Кэш HTTP отключён заголовками Cache-Control/Pragma.
      */
     public function profile(Request $request)
     {
-        // 1) Пытаемся аутентифицировать пользователя даже на публичном роуте:
-        // приоритет: guard sanctum -> стандартный -> ручной разбор bearer.
+        // 1) Аутентификация пользователя
         $user = Auth::guard('sanctum')->user() ?? $request->user();
 
         if (!$user) {
@@ -35,32 +24,23 @@ class UserApiController extends Controller
             if ($bearer) {
                 $pat = PersonalAccessToken::findToken($bearer);
                 if ($pat) {
-                    $user = $pat->tokenable; // \App\Models\User
+                    $user = $pat->tokenable;
                 }
             }
         }
 
-        // helper: безопасно достать секунды из listen_credits
+        // Helper: безопасно достать секунды из listen_credits
         $safeGetFreeSeconds = static function (?int $userId): int {
-            if (!$userId) {
-                return 0;
-            }
-            if (!Schema::hasTable('listen_credits')) {
-                return 0;
-            }
+            if (!$userId || !Schema::hasTable('listen_credits')) return 0;
 
             $hasSeconds = Schema::hasColumn('listen_credits', 'seconds_left');
             $hasMinutes = Schema::hasColumn('listen_credits', 'minutes');
 
-            if (!$hasSeconds && !$hasMinutes) {
-                return 0;
-            }
+            if (!$hasSeconds && !$hasMinutes) return 0;
 
             try {
                 $row = DB::table('listen_credits')->where('user_id', $userId)->first();
-                if (!$row) {
-                    return 0;
-                }
+                if (!$row) return 0;
 
                 if ($hasSeconds && isset($row->seconds_left) && $row->seconds_left !== null) {
                     return max(0, (int) $row->seconds_left);
@@ -72,7 +52,6 @@ class UserApiController extends Controller
             } catch (\Throwable $e) {
                 return 0;
             }
-
             return 0;
         };
 
@@ -80,13 +59,10 @@ class UserApiController extends Controller
         $r2Base = 'https://pub-231bc7be1b7343d6b8e04d0b559c9156.r2.dev';
         $formatR2Url = function($path) use ($r2Base) {
             if (!$path) return null;
-            // Если путь уже полный URL (например, R2), возвращаем его
             if (str_starts_with($path, 'http')) {
-                // Если это ошибочный URL на Railway со storage, вырезаем его
                 $path = str_replace('https://bookacloud-production.up.railway.app/storage/', '', $path);
                 if (str_starts_with($path, 'http')) return $path;
             }
-            // Удаляем "storage/" или "public/" из начала пути, если они там есть
             $cleanPath = ltrim($path, '/');
             if (str_starts_with($cleanPath, 'storage/')) {
                 $cleanPath = substr($cleanPath, 8);
@@ -94,10 +70,8 @@ class UserApiController extends Controller
             return $r2Base . '/' . ltrim($cleanPath, '/');
         };
 
-        // 2) Гость (нет токена) — отдаём пустой, но валидный профиль + no-cache заголовки
+        // 2) Гость — пустой профиль
         if (!$user) {
-            $freeSeconds = 0;
-
             return response()
                 ->json([
                     'id'             => null,
@@ -105,8 +79,8 @@ class UserApiController extends Controller
                     'email'          => null,
                     'is_paid'        => false,
                     'paid_until'     => null, 
-                    'free_seconds'   => $freeSeconds,
-                    'free_minutes'   => intdiv($freeSeconds, 60),
+                    'free_seconds'   => 0,
+                    'free_minutes'   => 0,
                     'favorites'      => [],
                     'listened'       => [],
                     'current_listen' => null,
@@ -116,11 +90,10 @@ class UserApiController extends Controller
                 ->header('Pragma', 'no-cache');
         }
 
-        // 3) Авторизованный пользователь — собираем полный профиль
+        // 3) Авторизованный пользователь
         $freeSeconds = $safeGetFreeSeconds((int) $user->id);
-        $freeMinutes = intdiv($freeSeconds, 60);
-
-        // Избранные книги (плоский JSON)
+        
+        // Избранные книги (без duration)
         $favorites = $user->favoriteBooks()
             ->with('author')
             ->get()
@@ -131,13 +104,12 @@ class UserApiController extends Controller
                     'author'      => optional($book->author)->name,
                     'cover_url'   => $formatR2Url($book->cover_url),
                     'thumb_url'   => $formatR2Url($book->thumb_url ?? $book->cover_url), 
-                    'duration'    => (string) ($book->duration ?? ""),
                     'description' => (string) ($book->description ?? ""),
                 ];
             })
             ->values();
 
-        // Прослушанные книги (плоский JSON)
+        // Прослушанные книги (без duration)
         $listened = $user->listenedBooks()
             ->with('author')
             ->get()
@@ -148,13 +120,12 @@ class UserApiController extends Controller
                     'author'      => optional($book->author)->name,
                     'cover_url'   => $formatR2Url($book->cover_url),
                     'thumb_url'   => $formatR2Url($book->thumb_url ?? $book->cover_url),
-                    'duration'    => (string) ($book->duration ?? ""),
                     'description' => (string) ($book->description ?? ""),
                 ];
             })
             ->values();
 
-        // Последняя запись прогресса (по updated_at), подгружаем книгу и главу
+        // Текущее прослушивание (без duration)
         $last = $user->listens()
             ->with(['book.author', 'chapter'])
             ->orderByDesc('updated_at')
@@ -173,18 +144,15 @@ class UserApiController extends Controller
                     'author'      => optional(optional($last->book)->author)->name,
                     'cover_url'   => $formatR2Url(optional($last->book)->cover_url),
                     'thumb_url'   => $formatR2Url(optional($last->book)->thumb_url ?? optional($last->book)->cover_url),
-                    'duration'    => (string) (optional($last->book)->duration ?? ""),
                     'description' => (string) (optional($last->book)->description ?? ""),
                 ],
                 'chapter'    => [
-                    'id'       => (int) $last->a_chapter_id,
-                    'title'    => optional($last->chapter)->title,
-                    'duration' => optional($last->chapter)->duration,
+                    'id'    => (int) $last->a_chapter_id,
+                    'title' => optional($last->chapter)->title,
                 ],
             ];
         }
 
-        // Итоговый ответ + no-cache заголовки
         return response()
             ->json([
                 'id'             => (int) $user->id,
@@ -193,7 +161,7 @@ class UserApiController extends Controller
                 'is_paid'        => (bool) $user->is_paid,
                 'paid_until'     => $user->paid_until ? $user->paid_until->toIso8601String() : null,
                 'free_seconds'   => $freeSeconds,
-                'free_minutes'   => $freeMinutes,
+                'free_minutes'   => intdiv($freeSeconds, 60),
                 'favorites'      => $favorites,
                 'listened'       => $listened,
                 'current_listen' => $currentListen,
