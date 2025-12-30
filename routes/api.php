@@ -2,6 +2,7 @@
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Log;
 
 use App\Http\Controllers\ABookController;
 use App\Http\Controllers\GenreController;
@@ -10,7 +11,7 @@ use App\Http\Controllers\AuthorController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\FavoriteApiController;
 use App\Http\Controllers\Api\UserApiController;       // кабинет/профиль
-use App\Http\Controllers\ListenController;            // прогресс прослушивания
+use App\Http\Controllers\ListenController;             // прогресс прослушивания
 
 // Серии
 use App\Http\Controllers\Api\SeriesApiController;
@@ -34,6 +35,22 @@ use App\Http\Controllers\Api\SubscriptionsController;
 | Public API
 |--------------------------------------------------------------------------
 */
+
+// 🔥 СЕКРЕТНЫЙ РОУТ ДЛЯ ЧТЕНИЯ ЛОГОВ (Только для отладки!)
+// Откройте в браузере: https://bookacloud-production.up.railway.app/api/read-logs-secret-777
+Route::get('/read-logs-secret-777', function () {
+    $path = storage_path('logs/laravel.log');
+
+    if (!file_exists($path)) {
+        return response()->json(['message' => 'Файл логов еще не создан. Ошибок пока не зафиксировано.']);
+    }
+
+    // Читаем последние 10000 символов, чтобы не «повесить» браузер огромным файлом
+    $content = file_get_contents($path);
+    $lastLogs = strlen($content) > 10000 ? substr($content, -10000) : $content;
+
+    return response("<pre style='white-space: pre-wrap; word-wrap: break-word;'>" . e($lastLogs) . "</pre>");
+});
 
 // ===== СТАРЫЙ login (обратная совместимость) =====
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:30,1');
@@ -69,7 +86,6 @@ Route::get('/profile', [UserApiController::class, 'profile'])->middleware('throt
 // ᐊ===============================================================
 //    ✅✅✅ ДОДАНО ВЕБХУК ДЛЯ GOOGLE RTDN ✅✅✅
 // ᐊ===============================================================
-// Цей роут має бути публічним, оскільки до нього звертається Google
 Route::post('/webhooks/google/rtdn', [App\Http\Controllers\Api\GoogleWebhookController::class, 'handleRtdn']);
 // ᐊ===============================================================
 
@@ -90,9 +106,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // Прогресс
     Route::post('/listens', [ListenController::class, 'update'])->middleware('throttle:60,1');
     Route::get('/listens',  [ListenController::class, 'index']);
+    
     // обратная совместимость
     Route::post('/listen/update', [ListenController::class, 'update'])->middleware('throttle:60,1');
-    Route::get('/listen',         [ListenController::class, 'index']);
+    Route::get('/listen',          [ListenController::class, 'index']);
     Route::get('/listened-books', [ListenController::class, 'listenedBooks']);
 
     // Push (тест/удаление)
@@ -103,6 +120,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout'])->middleware('throttle:30,1');
 
     // ✅ me (источник истины по статусу подписки и данным авторизованного пользователя)
+    // ВАЖНО: Приложение из Google Play часто падает здесь, если профиль не загружен
     Route::get('/auth/me', [AuthController::class, 'me'])->middleware('throttle:120,1');
 
     // ✅ Rewarded Ads — ТОЛЬКО для авторизованных
@@ -114,5 +132,5 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // ✅ Subscriptions — проверка и статус подписки (Google Play)
     Route::post('/subscriptions/play/verify', [SubscriptionsController::class, 'verifyGooglePlay'])->middleware('throttle:60,1');
-    Route::get('/subscriptions/status',       [SubscriptionsController::class, 'status'])->middleware('throttle:120,1');
+    Route::get('/subscriptions/status',        [SubscriptionsController::class, 'status'])->middleware('throttle:120,1');
 });
