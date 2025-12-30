@@ -76,6 +76,24 @@ class UserApiController extends Controller
             return 0;
         };
 
+        // Helper для формирования чистых ссылок на R2
+        $r2Base = 'https://pub-231bc7be1b7343d6b8e04d0b559c9156.r2.dev';
+        $formatR2Url = function($path) use ($r2Base) {
+            if (!$path) return null;
+            // Если путь уже полный URL (например, R2), возвращаем его
+            if (str_starts_with($path, 'http')) {
+                // Если это ошибочный URL на Railway со storage, вырезаем его
+                $path = str_replace('https://bookacloud-production.up.railway.app/storage/', '', $path);
+                if (str_starts_with($path, 'http')) return $path;
+            }
+            // Удаляем "storage/" или "public/" из начала пути, если они там есть
+            $cleanPath = ltrim($path, '/');
+            if (str_starts_with($cleanPath, 'storage/')) {
+                $cleanPath = substr($cleanPath, 8);
+            }
+            return $r2Base . '/' . ltrim($cleanPath, '/');
+        };
+
         // 2) Гость (нет токена) — отдаём пустой, но валидный профиль + no-cache заголовки
         if (!$user) {
             $freeSeconds = 0;
@@ -86,7 +104,7 @@ class UserApiController extends Controller
                     'name'           => null,
                     'email'          => null,
                     'is_paid'        => false,
-                    'paid_until'     => null, // Добавлено для синхронизации моделей
+                    'paid_until'     => null, 
                     'free_seconds'   => $freeSeconds,
                     'free_minutes'   => intdiv($freeSeconds, 60),
                     'favorites'      => [],
@@ -106,14 +124,14 @@ class UserApiController extends Controller
         $favorites = $user->favoriteBooks()
             ->with('author')
             ->get()
-            ->map(function ($book) {
+            ->map(function ($book) use ($formatR2Url) {
                 return [
                     'id'          => (int) $book->id,
                     'title'       => (string) $book->title,
                     'author'      => optional($book->author)->name,
-                    'cover_url'   => $book->cover_url,
-                    'thumb_url'   => $book->thumb_url ?? $book->cover_url, // Критично для отображения обложек
-                    'duration'    => (string) ($book->duration ?? ""),     // Обязательно для модели Book в Flutter
+                    'cover_url'   => $formatR2Url($book->cover_url),
+                    'thumb_url'   => $formatR2Url($book->thumb_url ?? $book->cover_url), 
+                    'duration'    => (string) ($book->duration ?? ""),
                     'description' => (string) ($book->description ?? ""),
                 ];
             })
@@ -123,13 +141,13 @@ class UserApiController extends Controller
         $listened = $user->listenedBooks()
             ->with('author')
             ->get()
-            ->map(function ($book) {
+            ->map(function ($book) use ($formatR2Url) {
                 return [
                     'id'          => (int) $book->id,
                     'title'       => (string) $book->title,
                     'author'      => optional($book->author)->name,
-                    'cover_url'   => $book->cover_url,
-                    'thumb_url'   => $book->thumb_url ?? $book->cover_url,
+                    'cover_url'   => $formatR2Url($book->cover_url),
+                    'thumb_url'   => $formatR2Url($book->thumb_url ?? $book->cover_url),
                     'duration'    => (string) ($book->duration ?? ""),
                     'description' => (string) ($book->description ?? ""),
                 ];
@@ -153,8 +171,8 @@ class UserApiController extends Controller
                     'id'          => (int) $last->a_book_id,
                     'title'       => optional($last->book)->title,
                     'author'      => optional(optional($last->book)->author)->name,
-                    'cover_url'   => optional($last->book)->cover_url,
-                    'thumb_url'   => optional($last->book)->thumb_url ?? optional($last->book)->cover_url,
+                    'cover_url'   => $formatR2Url(optional($last->book)->cover_url),
+                    'thumb_url'   => $formatR2Url(optional($last->book)->thumb_url ?? optional($last->book)->cover_url),
                     'duration'    => (string) (optional($last->book)->duration ?? ""),
                     'description' => (string) (optional($last->book)->description ?? ""),
                 ],
@@ -173,7 +191,7 @@ class UserApiController extends Controller
                 'name'           => (string) $user->name,
                 'email'          => (string) $user->email,
                 'is_paid'        => (bool) $user->is_paid,
-                'paid_until'     => $user->paid_until ? $user->paid_until->toIso8601String() : null, // Источник истины для подписки
+                'paid_until'     => $user->paid_until ? $user->paid_until->toIso8601String() : null,
                 'free_seconds'   => $freeSeconds,
                 'free_minutes'   => $freeMinutes,
                 'favorites'      => $favorites,
