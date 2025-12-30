@@ -36,20 +36,41 @@ use App\Http\Controllers\Api\SubscriptionsController;
 |--------------------------------------------------------------------------
 */
 
-// 🔥 СЕКРЕТНЫЙ РОУТ ДЛЯ ЧТЕНИЯ ЛОГОВ (Только для отладки!)
-// Откройте в браузере: https://bookacloud-production.up.railway.app/api/read-logs-secret-777
+// 🔥 СУПЕР-ДЕБАГ ЗВІТ
 Route::get('/read-logs-secret-777', function () {
-    $path = storage_path('logs/laravel.log');
-
-    if (!file_exists($path)) {
-        return response()->json(['message' => 'Файл логов еще не создан. Ошибок пока не зафиксировано.']);
+    $report = ["--- BOOKA DEBUG REPORT ---"];
+    
+    // 1. Перевірка БД
+    try {
+        $booksCount = \App\Models\ABook::count();
+        $report[] = "✅ База даних: Підключено (Книг у базі: $booksCount)";
+    } catch (\Exception $e) {
+        $report[] = "❌ ПОМИЛКА БД: " . $e->getMessage();
     }
 
-    // Читаем последние 10000 символов, чтобы не «повесить» браузер огромным файлом
-    $content = file_get_contents($path);
-    $lastLogs = strlen($content) > 10000 ? substr($content, -10000) : $content;
+    // 2. Перевірка диску S3 (R2)
+    try {
+        $s3 = \Illuminate\Support\Facades\Storage::disk('s3');
+        $report[] = "✅ Диск S3: Драйвер знайдено";
+        // Пробуємо згенерувати тестове посилання
+        $url = $s3->url('test.jpg');
+        $report[] = "✅ Тестовий URL S3: " . $url;
+    } catch (\Exception $e) {
+        $report[] = "❌ ПОМИЛКА S3: " . $e->getMessage();
+        $report[] = "Порада: Перевірте назви змінних AWS_... у Railway";
+    }
 
-    return response("<pre style='white-space: pre-wrap; word-wrap: break-word;'>" . e($lastLogs) . "</pre>");
+    // 3. Імітація запиту каталогу
+    try {
+        $controller = new \App\Http\Controllers\ABookController();
+        $controller->apiIndex(request());
+        $report[] = "✅ Запит /api/abooks: Успішно";
+    } catch (\Throwable $e) {
+        $report[] = "❌ ПОМИЛКА КАТАЛОГУ: " . $e->getMessage();
+        $report[] = "Файл: " . $e->getFile() . ":" . $e->getLine();
+    }
+
+    return response("<pre>" . implode("\n", $report) . "</pre>");
 });
 
 // ===== СТАРЫЙ login (обратная совместимость) =====
