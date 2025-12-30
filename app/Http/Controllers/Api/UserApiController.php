@@ -15,10 +15,10 @@ class UserApiController extends Controller
      * Профиль пользователя + актуальное «текущее прослушивание».
      *
      * Возвращает:
-     * - основные поля пользователя (id, name, email, is_paid)
+     * - основные поля пользователя (id, name, email, is_paid, paid_until)
      * - free_seconds — точный остаток в секундах (listen_credits.seconds_left или minutes*60)
      * - free_minutes — то же, intdiv(free_seconds, 60) для удобства клиентов
-     * - favorites, listened — плоские списки с author и cover_url
+     * - favorites, listened — плоские списки с author, cover_url, thumb_url и duration
      * - current_listen: book_id, chapter_id, position, updated_at + вложенные book и chapter
      * - server_time — текущее время сервера (ISO8601, UTC)
      *
@@ -86,6 +86,7 @@ class UserApiController extends Controller
                     'name'           => null,
                     'email'          => null,
                     'is_paid'        => false,
+                    'paid_until'     => null, // Добавлено для синхронизации моделей
                     'free_seconds'   => $freeSeconds,
                     'free_minutes'   => intdiv($freeSeconds, 60),
                     'favorites'      => [],
@@ -107,10 +108,13 @@ class UserApiController extends Controller
             ->get()
             ->map(function ($book) {
                 return [
-                    'id'        => (int) $book->id,
-                    'title'     => (string) $book->title,
-                    'author'    => optional($book->author)->name,
-                    'cover_url' => $book->cover_url,
+                    'id'          => (int) $book->id,
+                    'title'       => (string) $book->title,
+                    'author'      => optional($book->author)->name,
+                    'cover_url'   => $book->cover_url,
+                    'thumb_url'   => $book->thumb_url ?? $book->cover_url, // Критично для отображения обложек
+                    'duration'    => (string) ($book->duration ?? ""),     // Обязательно для модели Book в Flutter
+                    'description' => (string) ($book->description ?? ""),
                 ];
             })
             ->values();
@@ -121,10 +125,13 @@ class UserApiController extends Controller
             ->get()
             ->map(function ($book) {
                 return [
-                    'id'        => (int) $book->id,
-                    'title'     => (string) $book->title,
-                    'author'    => optional($book->author)->name,
-                    'cover_url' => $book->cover_url,
+                    'id'          => (int) $book->id,
+                    'title'       => (string) $book->title,
+                    'author'      => optional($book->author)->name,
+                    'cover_url'   => $book->cover_url,
+                    'thumb_url'   => $book->thumb_url ?? $book->cover_url,
+                    'duration'    => (string) ($book->duration ?? ""),
+                    'description' => (string) ($book->description ?? ""),
                 ];
             })
             ->values();
@@ -143,10 +150,13 @@ class UserApiController extends Controller
                 'position'   => (int) ($last->position ?? 0),
                 'updated_at' => optional($last->updated_at)->toIso8601String(),
                 'book'       => [
-                    'id'        => (int) $last->a_book_id,
-                    'title'     => optional($last->book)->title,
-                    'author'    => optional(optional($last->book)->author)->name,
-                    'cover_url' => optional($last->book)->cover_url,
+                    'id'          => (int) $last->a_book_id,
+                    'title'       => optional($last->book)->title,
+                    'author'      => optional(optional($last->book)->author)->name,
+                    'cover_url'   => optional($last->book)->cover_url,
+                    'thumb_url'   => optional($last->book)->thumb_url ?? optional($last->book)->cover_url,
+                    'duration'    => (string) (optional($last->book)->duration ?? ""),
+                    'description' => (string) (optional($last->book)->description ?? ""),
                 ],
                 'chapter'    => [
                     'id'       => (int) $last->a_chapter_id,
@@ -163,6 +173,7 @@ class UserApiController extends Controller
                 'name'           => (string) $user->name,
                 'email'          => (string) $user->email,
                 'is_paid'        => (bool) $user->is_paid,
+                'paid_until'     => $user->paid_until ? $user->paid_until->toIso8601String() : null, // Источник истины для подписки
                 'free_seconds'   => $freeSeconds,
                 'free_minutes'   => $freeMinutes,
                 'favorites'      => $favorites,
