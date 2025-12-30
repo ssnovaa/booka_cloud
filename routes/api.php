@@ -36,21 +36,26 @@ use App\Http\Controllers\Api\SubscriptionsController;
 |--------------------------------------------------------------------------
 */
 
-// 🔥 ОНОВЛЕНИЙ ДЕБАГ: Перевірка логів + Google Auth
+// 🔥 СУПЕР-ДЕБАГ: Перевірка конкретного користувача
 Route::get('/read-logs-secret-777', function () {
     $report = ["--- BOOKA DEBUG REPORT ---"];
     
-    // Перевірка конфігурації Google (чи є Client ID)
-    $report[] = "Google Client ID: " . (env('GOOGLE_CLIENT_ID') ? '✅ Налаштовано' : '❌ ВІДСУТНІЙ');
+    // 1. Шукаємо вашого користувача (замініть на ваш email)
+    $email = 'ВАШ_EMAIL@gmail.com'; 
+    $user = \App\Models\User::where('email', $email)->first();
 
-    // Читання логів (якщо вони записуються)
-    $path = storage_path('logs/laravel.log');
-    if (file_exists($path)) {
-        $content = file_get_contents($path);
-        $report[] = "\n--- ОСТАННІ ПОМИЛКИ З ЛОГ-ФАЙЛУ (laravel.log) ---";
-        $report[] = e(substr($content, -5000)); // Останні 5000 символів
+    if ($user) {
+        $report[] = "✅ Користувача знайдено: " . $user->email;
+        $report[] = "Статус підписки (is_paid): " . ($user->is_paid ? 'ТАК' : 'НІ');
+        $report[] = "Оплачено до (paid_until): " . ($user->paid_until ?? 'НЕМАЄ ДАТИ');
+        
+        // Перевірка логіки "чи активна підписка зараз"
+        $now = now();
+        $isExpired = $user->paid_until ? $now->greaterThan($user->paid_until) : true;
+        $report[] = "Поточний час сервера: " . $now->toDateTimeString();
+        $report[] = "Чи термін вже минув?: " . ($isExpired ? 'ТАК (має бути Free)' : 'НІ (ще Premium)');
     } else {
-        $report[] = "\nℹ️ Файл laravel.log не знайдено (Laravel пише помилки в консоль Railway)";
+        $report[] = "❌ Користувача з email $email не знайдено в базі Railway.";
     }
 
     return response("<pre>" . implode("\n", $report) . "</pre>");
