@@ -41,7 +41,7 @@ Route::get('/read-logs-secret-777', function () {
     $report = ["--- BOOKA DEBUG REPORT ---"];
     
     // 1. Шукаємо вашого користувача (замініть на ваш email)
-    $email = 'ВАШ_EMAIL@gmail.com'; 
+    $email = 'ssnovaa@gmail.com'; 
     $user = \App\Models\User::where('email', $email)->first();
 
     if ($user) {
