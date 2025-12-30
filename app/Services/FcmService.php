@@ -12,6 +12,8 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Сервіс відправлення push-сповіщень через FCM HTTP v1.
+ * - Пріоритетно використовує JSON-ключ із змінних оточення Railway.
+ * - Детально логує відповіді API Google у разі помилок (400, 401, 404).
  */
 class FcmService
 {
@@ -32,20 +34,21 @@ class FcmService
 
     public function __construct(LoggerInterface $log)
     {
+        // Отримуємо Project ID з конфігу (config/fcm.php)
         $this->projectId = (string) config('fcm.project_id');
         $this->log = $log;
 
-        // --- ІСПРАВЛЕННЯ: Пріоритет змінній оточення ---
+        // Пріоритет: спочатку перевіряємо змінні оточення Railway
         $jsonKey = env('FCM_CREDENTIALS_JSON');
 
         if (!empty($jsonKey)) {
-            // Якщо є текст у змінній — декодуємо його в масив
+            // Використовуємо JSON-текст безпосередньо
             $this->credentials = json_decode($jsonKey, true);
             $this->log->info('FcmService: Initialized using Environment Variable.');
         } else {
-            // Запасний варіант — шлях до файлу (як було раніше)
+            // Запасний варіант — шлях до локального файлу
             $this->credentials = (string) config('fcm.credentials_json');
-            $this->log->info('FcmService: Using local credentials path: ' . $this->credentials);
+            $this->log->info('FcmService: Initialized using local file path: ' . $this->credentials);
         }
 
         $this->http = new Client([
@@ -104,6 +107,7 @@ class FcmService
             }
             if ($cleanData) $message['data'] = $cleanData;
 
+            // Відправляємо запит до Google
             $res = $this->http->post($url, [
                 'headers' => [
                     'Authorization' => 'Bearer ' . $accessToken,
@@ -112,9 +116,26 @@ class FcmService
                 'json' => ['message' => $message],
             ]);
 
-            return $res->getStatusCode() === 200;
+            $statusCode = $res->getStatusCode();
+            $responseBody = (string) $res->getBody();
+
+            // Якщо статус не 200 — логуємо детальну помилку від Google
+            if ($statusCode !== 200) {
+                Log::error("FCM API Error Details", [
+                    'status_code' => $statusCode,
+                    'project_id'  => $this->projectId,
+                    'response'    => json_decode($responseBody, true),
+                    'token_prefix' => substr($token, 0, 10) . '...'
+                ]);
+                return false;
+            }
+
+            return true;
         } catch (Throwable $e) {
-            $this->log->error('FCM send failed', ['error' => $e->getMessage()]);
+            $this->log->error('FCM send critical failure', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
             return false;
         }
     }
@@ -131,14 +152,13 @@ class FcmService
 
         $scopes = ['https://www.googleapis.com/auth/firebase.messaging'];
 
-        // --- ІСПРАВЛЕННЯ: Підтримка масиву або шляху до файлу ---
         if (is_array($this->credentials)) {
-            // Використовуємо масив прямо з ENV
+            // Використовуємо дані прямо з масиву (ENV)
             $creds = new ServiceAccountCredentials($scopes, $this->credentials);
         } else {
-            // Перевіряємо наявність файлу, якщо ENV порожній
+            // Використовуємо шлях до файлу (запасний варіант)
             if (!is_file($this->credentials)) {
-                throw new \RuntimeException('FCM credentials not found (no ENV and no file).');
+                throw new \RuntimeException('FCM credentials not found: ' . $this->credentials);
             }
             $creds = new ServiceAccountCredentials($scopes, $this->credentials);
         }
