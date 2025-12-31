@@ -36,39 +36,61 @@ use App\Http\Controllers\Api\SubscriptionsController;
 |--------------------------------------------------------------------------
 */
 
-// 🔥 СУПЕР-ДЕБАГ: Перевірка підписки та балансу секунд
+// 🔥 СУПЕР-ДЕБАГ 2.0: Проверка подписки, баланса и СИСТЕМНЫХ ЛОГОВ
 Route::get('/read-logs-secret-777', function () {
     $report = ["--- BOOKA DEBUG REPORT ---"];
+    $report[] = "Время сервера: " . now()->toDateTimeString();
     
-    // 1. Шукаємо користувача
+    // 1. Поиск пользователя
     $email = 'ssnovaa@gmail.com'; 
     $user = \App\Models\User::where('email', $email)->first();
 
     if ($user) {
-        $report[] = "✅ Користувача знайдено: " . $user->email;
-        $report[] = "ID Користувача: " . $user->id;
-        $report[] = "------------------------------------------";
+        $report[] = "\n=== ПОЛЬЗОВАТЕЛЬ ===";
+        $report[] = "✅ Найдено: " . $user->email . " (ID: $user->id)";
+        $report[] = "Статус подписки: " . ($user->is_paid ? 'PREMIUM' : 'FREE');
+        $report[] = "Оплачено до: " . ($user->paid_until ?? 'НЕТ ДАТЫ');
         
-        // 2. Статус підписки
-        $report[] = "Статус підписки (is_paid): " . ($user->is_paid ? 'ТАК' : 'НІ');
-        $report[] = "Оплачено до (paid_until): " . ($user->paid_until ?? 'НЕМАЄ ДАТИ');
-        
-        $now = now();
-        $isExpired = $user->paid_until ? $now->greaterThan($user->paid_until) : true;
-        $report[] = "Поточний час сервера: " . $now->toDateTimeString();
-        $report[] = "Чи термін вже минув?: " . ($isExpired ? 'ТАК (має бути Free)' : 'НІ (ще Premium)');
-        $report[] = "------------------------------------------";
-
-        // 3. Баланс секунд (реклама)
-        // Використовуємо аксесор getCreditsAttribute, який ми раніше додали в модель User
         $credits = $user->credits; 
-        $report[] = "💰 ЗАЛИШОК СЕКУНД У БАЗІ: " . ($credits['seconds_left'] ?? '0');
-        
-    } else {
-        $report[] = "❌ Користувача з email $email не знайдено в базі Railway.";
+        $report[] = "💰 БАЛАНС: " . ($credits['seconds_left'] ?? '0') . " секунд";
+
+        // 2. Проверка последних событий рекламы в БД
+        $report[] = "\n=== ПОСЛЕДНИЕ СОБЫТИЯ РЕКЛАМЫ (DB) ===";
+        $events = DB::table('ad_reward_events')
+            ->where('user_id', $user->id)
+            ->orderBy('created_at', 'desc')
+            ->limit(5)
+            ->get();
+
+        if ($events->isEmpty()) {
+            $report[] = "Событий рекламы не найдено.";
+        } else {
+            foreach ($events as $e) {
+                $report[] = "[{$e->created_at}] Nonce: " . substr($e->nonce, 0, 8) . "... | Status: {$e->status} | Source: {$e->source}";
+            }
+        }
     }
 
-    return response("<pre>" . implode("\n", $report) . "</pre>");
+    // 3. ЧТЕНИЕ ФАЙЛА ЛОГОВ (laravel.log)
+    $report[] = "\n=== ПОСЛЕДНИЕ ЗАПИСИ ИЗ LARAVEL.LOG ===";
+    $logPath = storage_path('logs/laravel.log');
+
+    if (file_exists($logPath)) {
+        // Читаем последние 30 строк файла
+        $file = new SplFileObject($logPath, 'r');
+        $file->seek(PHP_INT_MAX);
+        $lastLine = $file->key();
+        $startLine = max(0, $lastLine - 30);
+        
+        $lines = new LimitIterator($file, $startLine, $lastLine);
+        foreach ($lines as $line) {
+            $report[] = trim($line);
+        }
+    } else {
+        $report[] = "Файл логов еще не создан (ошибок пока не было).";
+    }
+
+    return response("<pre style='background: #1e1e1e; color: #d4d4d4; padding: 20px;'>" . implode("\n", $report) . "</pre>");
 });
 // ===== СТАРЫЙ login (обратная совместимость) =====
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:30,1');
