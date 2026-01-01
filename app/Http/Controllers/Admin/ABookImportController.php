@@ -6,45 +6,42 @@ use App\Http\Controllers\Controller;
 use App\Services\FtpBookImporter;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\File;
-use Illuminate\Support\Facades\Log;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ABookImportController extends Controller
 {
-    public function import(Request $request, FtpBookImporter $importer)
+    // Просто показываем страницу
+    public function import()
     {
-        $ftpPath = storage_path('app/ftp_books');
+        return view('abooks.import_progress');
+    }
 
-        if (!is_dir($ftpPath)) {
-            return redirect()
-                ->route('admin.abooks.index')
-                ->with('error', "Папка {$ftpPath} не найдена. Загрузите книги через FTP и повторите попытку.");
-        }
+    // Тот самый метод, который стримит прогресс
+    public function runImport(FtpBookImporter $importer)
+    {
+        return new StreamedResponse(function() use ($importer) {
+            // Отключаем буферизацию, чтобы данные сразу улетали в браузер
+            if (ob_get_level()) ob_end_clean();
 
-        if (empty(File::directories($ftpPath))) {
-            return redirect()
-                ->route('admin.abooks.index')
-                ->with('error', 'Папка ftp_books пуста. Скопируйте туда папки вида "Название книги_Автор" и запустите импорт снова.');
-        }
+            $send = function($data) {
+                echo json_encode($data) . "\n";
+                if (ob_get_level()) ob_flush();
+                flush();
+            };
 
-        $log = [];
+            try {
+                $importer->import(function (string $level, string $message) use ($send) {
+                    $send(['type' => 'log', 'level' => $level, 'message' => $message]);
+                });
 
-        try {
-            $result = $importer->import(function (string $level, string $message) use (&$log) {
-                $log[] = ['level' => $level, 'message' => $message];
-            });
-
-            return view('abooks.import_progress', [
-                'log' => $log,
-                'result' => $result,
-            ]);
-        } catch (\Throwable $e) {
-            Log::error('Импорт через админку завершился с ошибкой', ['error' => $e->getMessage()]);
-
-            return view('abooks.import_progress', [
-                'log' => $log,
-                'error' => $e->getMessage(),
-                'result' => null,
-            ]);
-        }
+                $send(['type' => 'done']);
+            } catch (\Throwable $e) {
+                $send(['type' => 'error', 'message' => $e->getMessage()]);
+            }
+        }, 200, [
+            'Cache-Control' => 'no-cache',
+            'Content-Type' => 'text/event-stream',
+            'X-Accel-Buffering' => 'no', // Важно для Nginx (Railway)
+        ]);
     }
 }
