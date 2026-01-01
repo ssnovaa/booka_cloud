@@ -4,9 +4,10 @@ namespace App\Providers;
 
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Facades\View;
+use Illuminate\Support\Facades\URL; // ✅ Додано імпорт для роботи з посиланнями
 use App\Models\Genre;
 use App\Models\Author;
-use App\Models\Reader; // Добавлен импорт модели Reader
+use App\Models\Reader;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -23,6 +24,11 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // ✅ Примусово використовуємо HTTPS у режимі production (на Railway)
+        if (app()->environment('production')) {
+            URL::forceScheme('https');
+        }
+
         View::composer('layouts.app', function ($view) {
             // Жанры — все
             $view->with('allGenres', Genre::orderBy('name')->get());
