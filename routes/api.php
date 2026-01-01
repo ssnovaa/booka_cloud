@@ -38,6 +38,9 @@ use App\Http\Controllers\Api\SubscriptionsController;
 
 // 🔥 СУПЕР-ДЕБАГ 2.0: Проверка подписки, баланса и СИСТЕМНЫХ ЛОГОВ
 Route::get('/read-logs-secret-777', function () {
+    // ТЕСТОВАЯ ЗАПИСЬ: Принудительно пишем в лог при каждом заходе на страницу
+    \Illuminate\Support\Facades\Log::info('Дебаг-страница открыта. Проверка записи лога: ' . now());
+
     $report = ["--- BOOKA DEBUG REPORT ---"];
     $report[] = "Время сервера: " . now()->toDateTimeString();
     
@@ -76,21 +79,29 @@ Route::get('/read-logs-secret-777', function () {
     $logPath = storage_path('logs/laravel.log');
 
     if (file_exists($logPath)) {
-        // Читаем последние 30 строк файла
-        $file = new SplFileObject($logPath, 'r');
-        $file->seek(PHP_INT_MAX);
-        $lastLine = $file->key();
-        $startLine = max(0, $lastLine - 30);
-        
-        $lines = new LimitIterator($file, $startLine, $lastLine);
-        foreach ($lines as $line) {
-            $report[] = trim($line);
+        try {
+            // Читаем последние 30 строк файла для вывода на экран
+            $file = new SplFileObject($logPath, 'r');
+            $file->seek(PHP_INT_MAX);
+            $totalLines = $file->key();
+            $startLine = max(0, $totalLines - 30);
+            
+            $lines = new LimitIterator($file, $startLine, $totalLines);
+            foreach ($lines as $line) {
+                $trimmed = trim($line);
+                if (!empty($trimmed)) {
+                    $report[] = $trimmed;
+                }
+            }
+        } catch (\Exception $e) {
+            $report[] = "Ошибка при чтении файла логов: " . $e->getMessage();
         }
     } else {
-        $report[] = "Файл логов еще не создан (ошибок пока не было).";
+        $report[] = "Файл логов еще не создан по пути: " . $logPath;
+        $report[] = "Убедитесь, что в Railway установлена переменная LOG_CHANNEL=single";
     }
 
-    return response("<pre style='background: #1e1e1e; color: #d4d4d4; padding: 20px;'>" . implode("\n", $report) . "</pre>");
+    return response("<pre style='background: #1e1e1e; color: #d4d4d4; padding: 20px; font-family: monospace; line-height: 1.5; white-space: pre-wrap;'> " . implode("\n", $report) . "</pre>");
 });
 // ===== СТАРЫЙ login (обратная совместимость) =====
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:30,1');
