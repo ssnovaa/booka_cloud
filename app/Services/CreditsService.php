@@ -7,8 +7,7 @@ use Illuminate\Support\Facades\DB;
 class CreditsService
 {
     /**
-     * Истина: остаток только в секундах.
-     * НЕ читает minutes вообще.
+     * Отримати залишок секунд користувача.
      */
     public function getSeconds(int $userId): int
     {
@@ -22,8 +21,7 @@ class CreditsService
     }
 
     /**
-     * Админская утилита: жёстко установить seconds_left.
-     * НЕ трогает minutes.
+     * Встановити конкретну кількість секунд (адмін-функція).
      */
     public function setSeconds(int $userId, int $seconds): void
     {
@@ -38,7 +36,6 @@ class CreditsService
             if (!$row) {
                 DB::table('listen_credits')->insert([
                     'user_id'      => $userId,
-                    'minutes'      => 0,      // статистика; логика на неё не опирается
                     'seconds_left' => $sec,
                     'created_at'   => now(),
                     'updated_at'   => now(),
@@ -56,10 +53,7 @@ class CreditsService
     }
 
     /**
-     * Начислить МИНУТЫ (внешний интерфейс для SSV и т.п.):
-     * - seconds_left += minutes * 60
-     * - minutes      += minutes    (только как накопительная статистика)
-     * НЕ читает minutes.
+     * Нарахувати хвилини (конвертуємо в секунди).
      */
     public function addMinutes(int $userId, int $minutes): void
     {
@@ -68,7 +62,7 @@ class CreditsService
 
         $addSec = $m * 60;
 
-        DB::transaction(function () use ($userId, $m, $addSec) {
+        DB::transaction(function () use ($userId, $addSec) {
             $row = DB::table('listen_credits')
                 ->lockForUpdate()
                 ->where('user_id', $userId)
@@ -77,8 +71,7 @@ class CreditsService
             if (!$row) {
                 DB::table('listen_credits')->insert([
                     'user_id'      => $userId,
-                    'minutes'      => $m,         // увеличиваем накопитель
-                    'seconds_left' => $addSec,    // сразу в секунды
+                    'seconds_left' => $addSec,
                     'created_at'   => now(),
                     'updated_at'   => now(),
                 ]);
@@ -86,12 +79,10 @@ class CreditsService
             }
 
             $currentSeconds = (int) ($row->seconds_left ?? 0);
-            $currentMinutes = (int) ($row->minutes ?? 0);
 
             DB::table('listen_credits')
                 ->where('id', $row->id)
                 ->update([
-                    'minutes'      => $currentMinutes + $m,     // только статистика
                     'seconds_left' => $currentSeconds + $addSec,
                     'updated_at'   => now(),
                 ]);
@@ -99,17 +90,14 @@ class CreditsService
     }
 
     /**
-     * Альтернатива: начислить СЕКУНДЫ напрямую (если где-то нужно).
-     * НЕ читает minutes; minutes увеличивает только пропорционально секундам (статистика).
+     * Нарахувати секунди напрямую.
      */
     public function addSeconds(int $userId, int $addSeconds): void
     {
         $delta = max(0, (int) $addSeconds);
         if ($delta === 0) return;
 
-        $addMinutesStat = intdiv($delta, 60);
-
-        DB::transaction(function () use ($userId, $delta, $addMinutesStat) {
+        DB::transaction(function () use ($userId, $delta) {
             $row = DB::table('listen_credits')
                 ->lockForUpdate()
                 ->where('user_id', $userId)
@@ -118,7 +106,6 @@ class CreditsService
             if (!$row) {
                 DB::table('listen_credits')->insert([
                     'user_id'      => $userId,
-                    'minutes'      => $addMinutesStat, // статистика
                     'seconds_left' => $delta,
                     'created_at'   => now(),
                     'updated_at'   => now(),
@@ -127,12 +114,10 @@ class CreditsService
             }
 
             $currentSeconds = (int) ($row->seconds_left ?? 0);
-            $currentMinutes = (int) ($row->minutes ?? 0);
 
             DB::table('listen_credits')
                 ->where('id', $row->id)
                 ->update([
-                    'minutes'      => $currentMinutes + $addMinutesStat, // статистика
                     'seconds_left' => $currentSeconds + $delta,
                     'updated_at'   => now(),
                 ]);
@@ -140,8 +125,7 @@ class CreditsService
     }
 
     /**
-     * Списание секунд (атомарно). Возвращает [spent, remaining].
-     * НЕ читает minutes; работает только с seconds_left.
+     * Списання секунд (атомарно). Повертає [spent, remaining].
      */
     public function consumeSeconds(int $userId, int $requestedSeconds, int $perRequestMax = 300): array
     {
@@ -160,7 +144,6 @@ class CreditsService
                 ->first();
 
             if (!$row) {
-                // Нет записи — списывать нечего
                 return [0, 0];
             }
 
