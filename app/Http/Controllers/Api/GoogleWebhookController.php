@@ -67,8 +67,10 @@ class GoogleWebhookController extends Controller
             return response()->json(['status' => 'subscription_not_found'], 200);
         }
 
-        $user    = $subscription->user;
-        $wasPaid = (bool) $user->is_paid; // старий статус
+$user    = $subscription->user;
+// Використовуємо getRawOriginal, щоб отримати статус безпосередньо з БД, 
+// ігноруючи автоматичну перевірку дати paid_until в моделі User
+$wasPaid = (bool) $user->getRawOriginal('is_paid');
 
         // 4. Оновлюємо підписку через існуючий сервіс-верифікатор
         try {
