@@ -127,6 +127,9 @@ Route::middleware(['auth', IsAdmin::class])
 		
 		// Внутри группы admin
 		Route::get('/abooks/import/run', [ABookImportController::class, 'runImport'])->name('abooks.import.run');	
+		
+		// Внутри группы посредника 'admin'
+		Route::get('/abooks/bulk-upload', [ABookImportController::class, 'bulkUploadView'])->name('abooks.bulk-upload');
 
         // 👨‍💼 Керування АВТОРАМИ (редагування агентств і реквізитів)
         Route::resource('authors', AdminAuthorController::class)->only(['index', 'edit', 'update']);
