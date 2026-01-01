@@ -7,31 +7,33 @@
 
     @auth
         @if(auth()->user()->is_admin)
-            {{-- Кнопка Импорта из FTP --}}
-            <form action="{{ route('admin.abooks.import') }}" method="POST" class="inline-block mb-4 mr-4">
-                @csrf
-                <button type="submit" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 shadow">
-                    🚀 Импортировать книги из FTP
-                </button>
-            </form>
-            <p class="text-sm text-gray-700 mb-4">
-                Импорт выполняется прямо в админке без фонового процесса: после нажатия кнопки появится страница с пошаговым
-                логом и итогами.
-            </p>
-            <a href="{{ route('admin.abooks.create') }}"
-               class="inline-block mb-6 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
-                ➕ Добавить книгу
-            </a>
+            <div class="mb-6 border-b pb-6">
+                {{-- Заменено: Кнопка Массовой загрузки с ПК вместо FTP --}}
+                <a href="{{ route('admin.abooks.bulk-upload') }}" 
+                   class="inline-block mb-2 mr-4 bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 shadow transition font-bold">
+                    📁 Массовая загрузка книг (с ПК)
+                </a>
+
+                <a href="{{ route('admin.abooks.create') }}"
+                   class="inline-block mb-2 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition">
+                    ➕ Добавить одну книгу
+                </a>
+
+                <p class="text-sm text-gray-600 mt-2">
+                    <strong>Массовая загрузка:</strong> выберите папку на своем компьютере. Система сама распознает названия, 
+                    авторов, вычислит длительность аудио и защитит файлы в облаке R2.
+                </p>
+            </div>
         @endif
     @endauth
 
     {{-- Flash сообщение об успехе --}}
     @if(session('success'))
-        <div class="mb-4 text-green-600 font-bold">{{ session('success') }}</div>
+        <div class="mb-4 text-green-600 font-bold p-3 bg-green-50 border border-green-200 rounded">{{ session('success') }}</div>
     @endif
 
     @if(session('error'))
-        <div class="mb-4 text-red-600 font-bold">{{ session('error') }}</div>
+        <div class="mb-4 text-red-600 font-bold p-3 bg-red-50 border border-red-200 rounded">{{ session('error') }}</div>
     @endif
 
     {{-- 🔎 Форма поиска и фильтров --}}
@@ -60,9 +62,6 @@
             <option value="new" {{ request('sort') == 'new' ? 'selected' : '' }}>Сначала новые</option>
             <option value="duration" {{ request('sort') == 'duration' ? 'selected' : '' }}>По длительности</option>
         </select>
-
-        {{-- Убираем кнопку фильтрации, т.к. отправка происходит автоматически --}}
-        {{-- <button type="submit" class="bg-blue-500 text-white px-4 py-2 rounded">Фильтровать</button> --}}
     </form>
 
     {{-- 📚 Список книг --}}
