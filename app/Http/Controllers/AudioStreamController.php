@@ -12,14 +12,19 @@ use Laravel\Sanctum\PersonalAccessToken;
 class AudioStreamController extends Controller
 {
     /**
-     * Стрімінг HLS контенту (плейлист + сегменти) із захистом
+     * Стрімінг HLS контенту (плейлист + сегменти) із захистом.
+     * Підтримує авторизацію через Bearer заголовок або параметр ?token= у URL.
      */
     public function stream(Request $request, $id, $file = null)
     {
-        // 1. --- Авторизація (Ваш оригінальний код) ---
-        if ($token = $request->bearerToken()) {
+        // 1. --- Авторизація ---
+        // Пріоритет заголовку Bearer, якщо його немає — беремо з query string
+        $token = $request->bearerToken() ?? $request->query('token');
+
+        if ($token) {
             if ($pat = PersonalAccessToken::findToken($token)) {
                 if ($pat->tokenable) {
+                    // Авторизуємо користувача для поточної сесії запиту
                     Auth::login($pat->tokenable);
                 }
             }
@@ -32,32 +37,35 @@ class AudioStreamController extends Controller
             abort(404, 'Глава не знайдена');
         }
 
-        // 3. --- ВАША ЛОГІКА ЗАХИСТУ ---
+        // 3. --- ЛОГІКА ЗАХИСТУ ---
         // Перевірка: перша глава безкоштовна, решта — тільки для авторизованих
         $firstChapter = AChapter::where('a_book_id', $chapter->a_book_id)
             ->orderBy('order')
             ->first();
 
+        // Якщо це не перша глава і користувач не авторизований — доступ заборонено
         if (optional($firstChapter)->id !== (int)$id && !Auth::check()) {
-            abort(403, 'Доступ тільки для зареєстрованих користувачів');
+            abort(403, 'Доступ тільки для зареєстрованих користувачів. Будь ласка, увійдіть.');
         }
 
         // 4. --- ВИЗНАЧЕННЯ ФАЙЛА ДЛЯ ВИДАЧІ ---
-        // Якщо $file порожній — користувач запитує плейлист (index.m3u8)
-        // Якщо $file має назву (наприклад, seg_001.ts) — видаємо сегмент
+        // audio_path в базі тепер веде на index.m3u8
+        // Базова папка в R2: audio/hls/{book_id}/{chapter_id}
+        $basePath = dirname($chapter->audio_path); 
         
-        $basePath = dirname($chapter->audio_path); // Папка в R2: audio/hls/{book_id}/{chapter_id}
-        $requestedFile = $file ?: basename($chapter->audio_path); // За замовчуванням index.m3u8
+        // Якщо $file порожній — користувач запитує плейлист (index.m3u8)
+        // Якщо $file має назву (наприклад, seg_001.ts) — видаємо конкретний сегмент
+        $requestedFile = $file ?: basename($chapter->audio_path); 
         $fullPath = $basePath . '/' . $requestedFile;
 
         $disk = Storage::disk('s3_private');
 
         if (!$disk->exists($fullPath)) {
-            Log::error("HLS файл не знайдено в R2: " . $fullPath);
+            Log::error("HLS файл не знайдено в приватній хмарі R2: " . $fullPath);
             abort(404, 'Файл не знайдено');
         }
 
-        // 5. --- ВІДДАЧА КОНТЕНТУ ---
+        // 5. --- ВІДДАЧА КОНТЕНТУ ЧЕРЕЗ ПОТІК ---
         $fileSize = $disk->size($fullPath);
         $mimeType = $this->getMimeType($requestedFile);
 
@@ -67,7 +75,7 @@ class AudioStreamController extends Controller
             'Accept-Ranges'  => 'bytes',
         ];
 
-        // Якщо це плейлист (.m3u8), ми можемо додати кешування, але для захисту краще без нього
+        // Забороняємо кешування для файлу плейлиста, щоб токени перевірялися щоразу
         if (str_ends_with($requestedFile, '.m3u8')) {
             $headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
         }
@@ -82,7 +90,7 @@ class AudioStreamController extends Controller
     }
 
     /**
-     * Визначення MIME-типу для HLS файлів
+     * Визначення MIME-типу для HLS файлів (плейлисти та сегменти)
      */
     private function getMimeType($filename)
     {
@@ -90,8 +98,9 @@ class AudioStreamController extends Controller
             return 'application/x-mpegURL';
         }
         if (str_ends_with($filename, '.ts')) {
-            return 'video/MP2T'; // Стандартний тип для сегментів
+            return 'video/MP2T'; 
         }
+        // Для старих файлів або інших типів
         return 'audio/mpeg';
     }
 }
