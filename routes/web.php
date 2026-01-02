@@ -19,7 +19,7 @@ use App\Http\Controllers\Admin\PushAdminController;
 use App\Http\Controllers\Admin\ListeningStatsAdminController;
 use App\Http\Controllers\Admin\RoyaltyAdminController;
 use App\Http\Controllers\Admin\AuthorController as AdminAuthorController; // Аліас для адмінського контролера авторів
-use App\Http\Controllers\Admin\AgencyController; // ⬅️ ДОДАНО: Контролер агентств
+use App\Http\Controllers\Admin\AgencyController; // 🏢 Контролер агентств
 
 use App\Http\Controllers\SeriesPublicController;
 use App\Http\Controllers\ProfileDashboardController;
@@ -107,34 +107,32 @@ Route::middleware(['auth', IsAdmin::class])
         Route::put('/abooks/{id}', [ABookController::class, 'update'])->whereNumber('id')->name('abooks.update');
         Route::delete('/abooks/{id}', [ABookController::class, 'destroy'])->whereNumber('id')->name('abooks.destroy');
 
-        // Імпорт книг з FTP (через кнопку)
+        // Імпорт книг з FTP
         Route::post('/abooks/import', [ABookImportController::class, 'import'])->name('abooks.import');
+        Route::get('/abooks/import/run', [ABookImportController::class, 'runImport'])->name('abooks.import.run');
+        
+        // Масове завантаження (Drag and Drop)
+        Route::get('/abooks/bulk-upload', [ABookImportController::class, 'bulkUploadView'])->name('abooks.bulk-upload');
 
-        // Керування жанрами (CRUD окрім show)
+        // Керування жанрами
         Route::resource('genres', GenreController::class)->except(['show']);
 
-        // Серії: CRUD для серій книг
+        // Серії
         Route::resource('series', SeriesController::class)->except(['show']);
 
-        // Керування читцями (Readers) — повний CRUD
+        // Керування читцями
         Route::resource('readers', ReaderController::class);
 
-        // 🏢 Керування АГЕНТСТВАМИ (Правовласниками) — ⬅️ ДОДАНО
+        // 🏢 Керування агентствами (Правовласниками)
         Route::resource('agencies', AgencyController::class);
-		
-		// 🏢 Керування експорт роялти (Правовласниками) — ⬅️ ДОДАНО
+        
+        // 🏢 Експорт роялті
         Route::post('/royalties/export', [RoyaltyAdminController::class, 'export'])->name('royalties.export');
-		
-		// Внутри группы admin
-		Route::get('/abooks/import/run', [ABookImportController::class, 'runImport'])->name('abooks.import.run');	
-		
-		// Внутри группы посредника 'admin'
-		Route::get('/abooks/bulk-upload', [ABookImportController::class, 'bulkUploadView'])->name('abooks.bulk-upload');
 
-        // 👨‍💼 Керування АВТОРАМИ (редагування агентств і реквізитів)
+        // 👨‍💼 Керування авторами
         Route::resource('authors', AdminAuthorController::class)->only(['index', 'edit', 'update']);
 
-        // Керування главами аудіокниг (CRUD)
+        // Керування главами аудіокниг
         Route::prefix('abooks/{book}/chapters')->name('chapters.')->group(function () {
             Route::get('/create', [ChapterController::class, 'create'])->name('create');
             Route::post('/', [ChapterController::class, 'store'])->name('store');
@@ -143,13 +141,13 @@ Route::middleware(['auth', IsAdmin::class])
             Route::delete('/{chapter}', [ChapterController::class, 'destroy'])->name('destroy');
         });
 
-        // PUSH: форма та надсилання сповіщень усім користувачам
+        // PUSH сповіщення
         Route::prefix('push')->name('push.')->group(function () {
-            Route::get('/',  [PushAdminController::class, 'create'])->name('create'); // /admin/push
-            Route::post('/', [PushAdminController::class, 'store'])->name('store');   // /admin/push
+            Route::get('/',  [PushAdminController::class, 'create'])->name('create');
+            Route::post('/', [PushAdminController::class, 'store'])->name('store');
         });
 
-        // 📊 Статистика прослуховувань (адмінські сторінки та експорти)
+        // 📊 Статистика прослуховувань
         Route::get('/listens/stats', [ListeningStatsAdminController::class, 'index'])
             ->name('listens.stats');
 
@@ -171,26 +169,25 @@ Route::middleware(['auth', IsAdmin::class])
             ->whereNumber('a_book_id')
             ->name('listens.book.export.chapters');
 
-        // 👤 Звіт по авторам (статистика часу)
+        // 👤 Звіт по авторам
         Route::get('/listens/authors', [ListeningStatsAdminController::class, 'authors'])
             ->name('listens.authors');
 
         Route::get('/listens/authors/export.csv', [ListeningStatsAdminController::class, 'exportAuthorsCsv'])
             ->name('listens.authors.export');
 
-        // 💰 Роялті (Калькулятор виплат)
+        // 💰 Роялті
         Route::get('/royalties', [RoyaltyAdminController::class, 'index'])
             ->name('royalties.index');
     });
 
 /*
 |--------------------------------------------------------------------------
-| Потокове аудіо (демо-глава доступна усім, інші — лише авторизованим;
-| перевірка виконується у контролері). Дозволено GET та HEAD для коректних
-| заголовків діапазонів при HEAD без тіла відповіді.
+| Потокове аудіо (HLS: Плейлист + Сегменти)
 |--------------------------------------------------------------------------
+| 🔥 ВИПРАВЛЕНО: Додано {file?}, щоб приймати назви сегментів (seg_001.ts тощо)
 */
-Route::match(['GET', 'HEAD'], '/audio/{id}', [AudioStreamController::class, 'stream'])
+Route::match(['GET', 'HEAD'], '/audio/{id}/{file?}', [AudioStreamController::class, 'stream'])
     ->whereNumber('id')
     ->name('audio.stream');
 
@@ -227,7 +224,7 @@ Route::middleware('auth')->group(function () {
 
 /*
 |--------------------------------------------------------------------------
-| Тестовий API-маршрут для діагностики роботи файлу web.php
+| Тестовий API-маршрут
 |--------------------------------------------------------------------------
 */
 Route::get('/api/debug-web', function () {
