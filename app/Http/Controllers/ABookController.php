@@ -11,11 +11,12 @@ use App\Models\Agency;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Intervention\Image\Laravel\Facades\Image;
-use getID3; // Импорт библиотеки для анализа MP3-файлов
+use getID3; // Бібліотека для аналізу MP3
+use FFMpeg\FFMpeg; // Бібліотека для роботи з FFmpeg
 
 class ABookController extends Controller
 {
-    // ======================= [АДМИНИСТРУВАННЯ: WEB] =======================
+    // ======================= [АДМІНІСТРУВАННЯ: WEB] =======================
 
     // Список книг
     public function index(Request $request)
@@ -75,34 +76,34 @@ class ABookController extends Controller
         return view('admin.abooks.create', compact('genres', 'readers', 'agencies'));
     }
 
-    // Збереження (Аудио загружается в приватный бакет s3_private с расчетом длительности)
+    // Збереження (Конвертація в HLS та завантаження в R2)
     public function store(Request $request)
     {
         $validated = $request->validate([
             'title' => 'required|string|max:255',
-            'author' => 'required|string|max:255',
+            'author' => 'nullable|string|max:255', // Зроблено nullable
             'reader_id' => 'nullable|exists:readers,id',
             'series_id' => 'nullable|exists:series,id',
             'agency_id' => 'nullable|exists:agencies,id',
             'description' => 'nullable|string',
-            'genres' => 'required|array',
+            'genres' => 'nullable|array', // Зроблено nullable
             'genres.*' => 'integer|exists:genres,id',
             'cover_file' => 'required|image|mimes:jpg,jpeg,png',
             'audio_files' => 'required|array',
             'audio_files.*' => 'required|mimes:mp3,wav',
         ]);
 
-        // 1. ЗАВАНТАЖЕННЯ ОБКЛАДИНКИ НА ПУБЛИЧНЫЙ R2 (s3)
+        // 1. ОБКЛАДИНКИ (Публічний R2)
         $coverFile = $request->file('cover_file');
         $coverName = 'covers/' . time() . '_' . $coverFile->getClientOriginalName();
         Storage::disk('s3')->put($coverName, fopen($coverFile->getRealPath(), 'r+'), 'public');
 
-        // 2. ГЕНЕРАЦІЯ ТА ЗАВАНТАЖЕННЯ МІНІАТЮРИ НА ПУБЛИЧНЫЙ R2 (s3)
         $image = Image::read($coverFile->getRealPath())->cover(200, 300);
         $thumbName = 'covers/thumb_' . basename($coverName);
         Storage::disk('s3')->put($thumbName, (string) $image->toJpeg(80), 'public');
 
-        $author = Author::firstOrCreate(['name' => $validated['author']]);
+        $authorName = $validated['author'] ?? 'Невідомий автор';
+        $author = Author::firstOrCreate(['name' => $authorName]);
 
         $book = ABook::create([
             'title' => $validated['title'],
@@ -115,36 +116,63 @@ class ABookController extends Controller
             'thumb_url' => $thumbName, 
         ]);
 
-        $book->genres()->sync($validated['genres']);
+        if (!empty($validated['genres'])) {
+            $book->genres()->sync($validated['genres']);
+        }
 
-        // 3. ЗАВАНТАЖЕННЯ АУДІОФАЙЛІВ НА ПРИВАТНЫЙ R2 (s3_private) С РАСЧЕТОМ ДЛИТЕЛЬНОСТИ
+        // 2. ОБРОБКА АУДІО (HLS + Приватний R2)
         $getID3 = new getID3();
         $totalSeconds = 0;
 
         foreach ($request->file('audio_files') as $index => $audioFile) {
-            $audioName = 'audio/' . time() . '_' . $audioFile->getClientOriginalName();
+            $chapterIndex = $index + 1;
+            $tempPath = $audioFile->getRealPath();
             
-            // Анализ длительности аудиофайла
-            $fileInfo = $getID3->analyze($audioFile->getRealPath());
-            $duration = isset($fileInfo['playtime_seconds']) ? (int) round($fileInfo['playtime_seconds']) : 0;
+            // Аналіз тривалості
+            $fileInfo = $getID3->analyze($tempPath);
+            $duration = (int) round($fileInfo['playtime_seconds'] ?? 0);
             $totalSeconds += $duration;
 
-            // Загрузка в приватный диск
-            Storage::disk('s3_private')->put($audioName, fopen($audioFile->getRealPath(), 'r+'));
+            // Створюємо тимчасову папку для сегментів HLS
+            $localHlsFolder = storage_path("app/temp_hls/{$book->id}/{$chapterIndex}");
+            if (!file_exists($localHlsFolder)) {
+                mkdir($localHlsFolder, 0777, true);
+            }
+
+            $playlistName = "index.m3u8";
+            $localPlaylistPath = "{$localHlsFolder}/{$playlistName}";
+
+            // Нарізка аудіо на сегменти по 10 секунд за допомогою FFmpeg
+            $cmd = "ffmpeg -i " . escapeshellarg($tempPath) . " -c:a libmp3lame -b:a 128k -map 0:0 -f hls -hls_time 10 -hls_list_size 0 -hls_segment_filename " . escapeshellarg("{$localHlsFolder}/seg_%03d.ts") . " " . escapeshellarg($localPlaylistPath) . " 2>&1";
+            shell_exec($cmd);
+
+            // Завантажуємо всі файли з тимчасової папки в R2
+            $files = scandir($localHlsFolder);
+            $cloudFolder = "audio/hls/{$book->id}/{$chapterIndex}";
+            
+            foreach ($files as $file) {
+                if ($file === '.' || $file === '..') continue;
+                $cloudPath = "{$cloudFolder}/{$file}";
+                Storage::disk('s3_private')->put($cloudPath, fopen("{$localHlsFolder}/{$file}", 'r+'));
+            }
+
+            // Очищення тимчасових локальних файлів
+            array_map('unlink', glob("{$localHlsFolder}/*.*"));
+            rmdir($localHlsFolder);
 
             AChapter::create([
                 'a_book_id' => $book->id,
-                'title' => 'Глава ' . ($index + 1),
-                'order' => $index + 1,
-                'audio_path' => $audioName,
+                'title' => 'Глава ' . $chapterIndex,
+                'order' => $chapterIndex,
+                'audio_path' => "{$cloudFolder}/{$playlistName}", // Зберігаємо шлях до плейлиста
                 'duration' => $duration,
             ]);
         }
 
-        // Обновляем общую длительность книги (в минутах)
+        // Оновлюємо тривалість книги в хвилинах
         $book->update(['duration' => (int) round($totalSeconds / 60)]);
 
-        return redirect('/abooks')->with('success', 'Книгу успішно додано! Аудіо захищено в приватному сховищі R2.');
+        return redirect('/abooks')->with('success', 'Книгу успішно додано та конвертовано в HLS!');
     }
 
     // Форма редагування
@@ -166,18 +194,17 @@ class ABookController extends Controller
 
         $validated = $request->validate([
             'title' => 'required|string|max:255',
-            'author' => 'required|string|max:255',
+            'author' => 'nullable|string|max:255',
             'reader_id' => 'nullable|exists:readers,id',
             'series_id' => 'nullable|exists:series,id',
             'agency_id' => 'nullable|exists:agencies,id',
             'description' => 'nullable|string',
-            'genres' => 'required|array',
+            'genres' => 'nullable|array',
             'genres.*' => 'integer|exists:genres,id',
             'cover_file' => 'nullable|image|mimes:jpg,jpeg,png|max:2048',
         ]);
 
         if ($request->hasFile('cover_file')) {
-            // Видаляємо старі файли з ПУБЛИЧНОГО S3
             if ($book->cover_url) {
                 Storage::disk('s3')->delete($book->cover_url);
             }
@@ -197,7 +224,8 @@ class ABookController extends Controller
             $book->thumb_url = $thumbName;
         }
 
-        $author = Author::firstOrCreate(['name' => $validated['author']]);
+        $authorName = $validated['author'] ?? 'Невідомий автор';
+        $author = Author::firstOrCreate(['name' => $authorName]);
         
         $book->author_id = $author->id;
         $book->reader_id = $validated['reader_id'] ?? null;
@@ -207,7 +235,9 @@ class ABookController extends Controller
         $book->description = $validated['description'] ?? null;
         $book->save();
 
-        $book->genres()->sync($validated['genres']);
+        if (isset($validated['genres'])) {
+            $book->genres()->sync($validated['genres']);
+        }
 
         return redirect()->route('admin.abooks.index')->with('success', 'Книгу оновлено');
     }
@@ -217,7 +247,6 @@ class ABookController extends Controller
     {
         $book = ABook::findOrFail($id);
 
-        // Видаляємо обкладинки з ПУБЛИЧНОГО R2 (s3)
         if ($book->cover_url) {
             Storage::disk('s3')->delete($book->cover_url);
         }
@@ -225,10 +254,12 @@ class ABookController extends Controller
             Storage::disk('s3')->delete($book->thumb_url);
         }
 
-        // Видаляємо всі аудіофайли глав з ПРИВАТНОГО R2 (s3_private)
+        // Видаляємо всі папки HLS глав з ПРИВАТНОГО R2
         $book->chapters()->each(function ($chapter) {
             if ($chapter->audio_path) {
-                Storage::disk('s3_private')->delete($chapter->audio_path);
+                // Видаляємо всю папку, де лежить плейлист і сегменти
+                $folder = dirname($chapter->audio_path);
+                Storage::disk('s3_private')->deleteDirectory($folder);
             }
             $chapter->delete();
         });
@@ -236,7 +267,7 @@ class ABookController extends Controller
         $book->genres()->detach();
         $book->delete();
 
-        return redirect('/admin/abooks')->with('success', 'Книгу та захищені файли видалено з R2');
+        return redirect('/admin/abooks')->with('success', 'Книгу та HLS-файли видалено');
     }
 
     // Перегляд книги (адмінка)
@@ -247,13 +278,11 @@ class ABookController extends Controller
     }
 
     // ======================= [API: MOBILE APP] =======================
-    
-    // Каталог (JSON)
+
     public function apiIndex(Request $request)
     {
         $query = ABook::with(['author', 'reader', 'genres', 'series', 'agency']);
 
-        // Поиск
         if ($search = $request->input('search')) {
             $query->where(function ($q) use ($search) {
                 $q->where('title', 'like', "%{$search}%")
@@ -264,7 +293,6 @@ class ABookController extends Controller
             });
         }
 
-        // Фильтры
         if ($genre = $request->input('genre')) {
             $genres = is_array($genre) ? $genre : explode(',', $genre);
             $genres = array_filter(array_map('trim', $genres), fn($v) => $v !== '');
@@ -310,26 +338,7 @@ class ABookController extends Controller
                 $query->whereIn('series_id', $ids);
             }
         }
-        if ($series = $request->input('series')) {
-            $names = is_array($series) ? $series : explode(',', $series);
-            $names = array_filter(array_map('trim', $names), fn($v) => $v !== '');
-            if (!empty($names)) {
-                $query->whereHas('series', function ($q) use ($names) {
-                    $q->where(function ($w) use ($names) {
-                        foreach ($names as $n) {
-                            if (is_numeric($n)) {
-                                $w->orWhere('id', $n);
-                            } else {
-                                $clean = trim($n, " \t\n\r\0\x0B\"'«»„“”");
-                                $w->orWhere('title', 'like', "%{$clean}%");
-                            }
-                        }
-                    });
-                });
-            }
-        }
 
-        // Сортировка
         if ($sort = $request->input('sort')) {
             if ($sort === 'new') {
                 $query->orderBy('created_at', 'desc');
@@ -358,11 +367,8 @@ class ABookController extends Controller
                     'reader'      => $book->reader?->name,
                     'description' => $book->description,
                     'duration'    => $book->duration,
-                    
-                    // 🔥 ХМАРНІ ПОСИЛАННЯ НА ОБКЛАДИНКИ (S3)
                     'cover_url'   => $book->cover_url ? Storage::disk('s3')->url($book->cover_url) : null,
                     'thumb_url'   => $book->thumb_url ? Storage::disk('s3')->url($book->thumb_url) : null,
-                    
                     'genres'      => $book->genres->map(function ($genre) {
                         return [
                             'id'   => $genre->id,
@@ -378,7 +384,6 @@ class ABookController extends Controller
         return response()->json($result, 200, [], JSON_UNESCAPED_UNICODE);
     }
 
-    // Одна книга (JSON)
     public function apiShow($id)
     {
         $book = ABook::with(['author', 'reader', 'genres', 'series', 'agency'])->findOrFail($id);
@@ -390,11 +395,8 @@ class ABookController extends Controller
             'reader'      => $book->reader?->name,
             'description' => $book->description,
             'duration'    => $book->duration,
-            
-            // 🔥 ХМАРНІ ПОСИЛАННЯ НА ОБКЛАДИНКИ (S3)
             'cover_url'   => $book->cover_url ? Storage::disk('s3')->url($book->cover_url) : null,
             'thumb_url'   => $book->thumb_url ? Storage::disk('s3')->url($book->thumb_url) : null,
-            
             'genres'      => $book->genres->map(function ($genre) {
                 return [
                     'id'   => $genre->id,
@@ -408,7 +410,6 @@ class ABookController extends Controller
         return response()->json($result, 200, [], JSON_UNESCAPED_UNICODE);
     }
 
-    // Глави книги (JSON)
     public function apiChapters($id)
     {
         $book = ABook::findOrFail($id);
