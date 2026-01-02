@@ -264,8 +264,11 @@ class ABookController extends Controller
 
         $book->chapters()->each(function ($chapter) {
             if ($chapter->audio_path) {
-                $folder = dirname($chapter->audio_path);
-                Storage::disk('s3_private')->deleteDirectory($folder);
+                if (str_ends_with($chapter->audio_path, '.m3u8')) {
+                    Storage::disk('s3_private')->deleteDirectory(dirname($chapter->audio_path));
+                } else {
+                    Storage::disk('s3_private')->delete($chapter->audio_path);
+                }
             }
             $chapter->delete();
         });
@@ -354,6 +357,7 @@ class ABookController extends Controller
                 $query->orderBy('duration', 'desc');
             }
         } else {
+            // 🔥 ВИПРАВЛЕННЯ: якщо сортування не обрано, показуємо спочатку нові книги
             $query->orderBy('created_at', 'desc');
         }
 
@@ -369,7 +373,8 @@ class ABookController extends Controller
                 return [
                     'id'          => $book->id,
                     'title'       => $book->title,
-                    'author'      => $book->author?->name,
+                    // 🔥 ВИПРАВЛЕННЯ: Додано перевірку на null, щоб Flutter не падав
+                    'author'      => $book->author?->name ?? 'Невідомий автор',
                     'reader'      => $book->reader?->name,
                     'description' => $book->description,
                     'duration'    => $book->duration,
@@ -397,7 +402,7 @@ class ABookController extends Controller
         $result = [
             'id'          => $book->id,
             'title'       => $book->title,
-            'author'      => $book->author?->name,
+            'author'      => $book->author?->name ?? 'Невідомий автор',
             'reader'      => $book->reader?->name,
             'description' => $book->description,
             'duration'    => $book->duration,
@@ -424,12 +429,18 @@ class ABookController extends Controller
             ->orderBy('order')
             ->get()
             ->map(function ($chapter) {
+                // 🔥 ГІБРИДНА ЛОГІКА ПОСИЛАНЬ:
+                $isHls = str_ends_with($chapter->audio_path, '.m3u8');
+                $url = $isHls 
+                    ? url("/audio/{$chapter->id}/index.m3u8") 
+                    : url("/audio/{$chapter->id}");
+
                 return [
                     'id'        => $chapter->id,
                     'duration'  => $chapter->duration,
                     'title'     => $chapter->title,
                     'order'     => $chapter->order,
-                    'audio_url' => $chapter->audio_path ? url('/audio/' . $chapter->id) : null,
+                    'audio_url' => $chapter->audio_path ? $url : null,
                 ];
             })->values();
 
