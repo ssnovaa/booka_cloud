@@ -79,9 +79,9 @@ class ABookController extends Controller
     // Збереження (Конвертація в HLS та завантаження в R2)
     public function store(Request $request)
     {
-        // 🔥 ОПТИМІЗАЦІЯ: Знімаємо ліміти часу для Railway та FFmpeg
-        set_time_limit(0); 
-        ini_set('memory_limit', '1024M'); 
+        // 🔥 ОПТИМІЗАЦІЯ ДЛЯ ВЕЛИКИХ ФАЙЛІВ
+        set_time_limit(0); // Знімаємо обмеження за часом виконання
+        ini_set('memory_limit', '1024M'); // Виділяємо 1 ГБ оперативної пам'яті
 
         $validated = $request->validate([
             'title' => 'required|string|max:255',
@@ -97,7 +97,7 @@ class ABookController extends Controller
             'audio_files.*' => 'required|mimes:mp3,wav',
         ]);
 
-        // 1. ОБКЛАДИНКИ
+        // 1. ОБКЛАДИНКИ (Публічний R2)
         $coverFile = $request->file('cover_file');
         $coverName = 'covers/' . time() . '_' . $coverFile->getClientOriginalName();
         Storage::disk('s3')->put($coverName, fopen($coverFile->getRealPath(), 'r+'), 'public');
@@ -124,7 +124,7 @@ class ABookController extends Controller
             $book->genres()->sync($validated['genres']);
         }
 
-        // 2. ОБРОБКА АУДІО
+        // 2. ОБРОБКА АУДІО (HLS + Приватний R2)
         $getID3 = new getID3();
         $totalSeconds = 0;
 
@@ -132,10 +132,12 @@ class ABookController extends Controller
             $chapterIndex = $index + 1;
             $tempPath = $audioFile->getRealPath();
             
+            // Аналіз тривалості
             $fileInfo = $getID3->analyze($tempPath);
             $duration = (int) round($fileInfo['playtime_seconds'] ?? 0);
             $totalSeconds += $duration;
 
+            // Створюємо тимчасову папку для сегментів HLS
             $localHlsFolder = storage_path("app/temp_hls/{$book->id}/{$chapterIndex}");
             if (!file_exists($localHlsFolder)) {
                 mkdir($localHlsFolder, 0777, true);
@@ -144,10 +146,11 @@ class ABookController extends Controller
             $playlistName = "index.m3u8";
             $localPlaylistPath = "{$localHlsFolder}/{$playlistName}";
 
-            // 🔥 ШВИДКИЙ FFmpeg (додано -preset superfast та -threads 0)
-            $cmd = "ffmpeg -i " . escapeshellarg($tempPath) . " -c:a libmp3lame -b:a 128k -map 0:0 -f hls -hls_time 10 -hls_list_size 0 -threads 0 -preset superfast -hls_segment_filename " . escapeshellarg("{$localHlsFolder}/seg_%03d.ts") . " " . escapeshellarg($localPlaylistPath) . " 2>&1";
+            // 🔥 ПРИСКОРЕНА НАРІЗКА (додано -threads 0 для максимальної швидкості)
+            $cmd = "ffmpeg -i " . escapeshellarg($tempPath) . " -c:a libmp3lame -b:a 128k -map 0:0 -f hls -hls_time 10 -hls_list_size 0 -threads 0 -hls_segment_filename " . escapeshellarg("{$localHlsFolder}/seg_%03d.ts") . " " . escapeshellarg($localPlaylistPath) . " 2>&1";
             shell_exec($cmd);
 
+            // Завантажуємо всі файли з тимчасової папки в R2
             if (file_exists($localPlaylistPath)) {
                 $files = scandir($localHlsFolder);
                 $cloudFolder = "audio/hls/{$book->id}/{$chapterIndex}";
@@ -158,6 +161,7 @@ class ABookController extends Controller
                     Storage::disk('s3_private')->put($cloudPath, fopen("{$localHlsFolder}/{$file}", 'r+'));
                 }
 
+                // Очищення тимчасових локальних файлів
                 array_map('unlink', glob("{$localHlsFolder}/*.*"));
                 rmdir($localHlsFolder);
 
@@ -171,18 +175,21 @@ class ABookController extends Controller
             }
         }
 
+        // Оновлюємо тривалість книги в хвилинах
         $book->update(['duration' => (int) round($totalSeconds / 60)]);
 
-        return redirect('/abooks')->with('success', 'Книгу успішно додано!');
+        return redirect('/abooks')->with('success', 'Книгу успішно додано та конвертовано в HLS!');
     }
 
     // Форма редагування
     public function edit($id)
     {
         $book = ABook::with(['genres', 'author', 'reader', 'agency'])->findOrFail($id);
+        
         $genres = Genre::orderBy('name')->get();
         $readers = Reader::orderBy('name')->get();
         $agencies = Agency::orderBy('name')->get();
+
         return view('admin.abooks.edit', compact('book', 'genres', 'readers', 'agencies'));
     }
 
@@ -190,6 +197,7 @@ class ABookController extends Controller
     public function update(Request $request, $id)
     {
         set_time_limit(0); 
+
         $book = ABook::findOrFail($id);
 
         $validated = $request->validate([
@@ -205,8 +213,12 @@ class ABookController extends Controller
         ]);
 
         if ($request->hasFile('cover_file')) {
-            if ($book->cover_url) Storage::disk('s3')->delete($book->cover_url);
-            if ($book->thumb_url) Storage::disk('s3')->delete($book->thumb_url);
+            if ($book->cover_url) {
+                Storage::disk('s3')->delete($book->cover_url);
+            }
+            if ($book->thumb_url) {
+                Storage::disk('s3')->delete($book->thumb_url);
+            }
 
             $newCoverFile = $request->file('cover_file');
             $newCoverName = 'covers/' . time() . '_' . $newCoverFile->getClientOriginalName();
@@ -224,6 +236,9 @@ class ABookController extends Controller
         $author = Author::firstOrCreate(['name' => $authorName]);
         
         $book->author_id = $author->id;
+        $book->reader_id = $validated['reader_id'] ?? null;
+        $book->series_id = $validated['series_id'] ?? null;
+        $book->agency_id = $validated['agency_id'] ?? null;
         $book->title = $validated['title'];
         $book->description = $validated['description'] ?? null;
         $book->save();
@@ -240,17 +255,17 @@ class ABookController extends Controller
     {
         $book = ABook::findOrFail($id);
 
-        if ($book->cover_url) Storage::disk('s3')->delete($book->cover_url);
-        if ($book->thumb_url) Storage::disk('s3')->delete($book->thumb_url);
+        if ($book->cover_url) {
+            Storage::disk('s3')->delete($book->cover_url);
+        }
+        if ($book->thumb_url) {
+            Storage::disk('s3')->delete($book->thumb_url);
+        }
 
         $book->chapters()->each(function ($chapter) {
             if ($chapter->audio_path) {
-                // 🔥 БЕЗПЕЧНЕ ВИДАЛЕННЯ: якщо це HLS (.m3u8), видаляємо папку, якщо MP3 — тільки файл
-                if (str_ends_with($chapter->audio_path, '.m3u8')) {
-                    Storage::disk('s3_private')->deleteDirectory(dirname($chapter->audio_path));
-                } else {
-                    Storage::disk('s3_private')->delete($chapter->audio_path);
-                }
+                $folder = dirname($chapter->audio_path);
+                Storage::disk('s3_private')->deleteDirectory($folder);
             }
             $chapter->delete();
         });
@@ -258,7 +273,7 @@ class ABookController extends Controller
         $book->genres()->detach();
         $book->delete();
 
-        return redirect('/admin/abooks')->with('success', 'Книгу видалено');
+        return redirect('/admin/abooks')->with('success', 'Книгу та HLS-файли видалено');
     }
 
     // Перегляд книги (адмінка)
@@ -273,61 +288,151 @@ class ABookController extends Controller
     public function apiIndex(Request $request)
     {
         $query = ABook::with(['author', 'reader', 'genres', 'series', 'agency']);
-        $books = $query->paginate($request->input('per_page', 20));
 
-        return response()->json([
+        if ($search = $request->input('search')) {
+            $query->where(function ($q) use ($search) {
+                $q->where('title', 'like', "%{$search}%")
+                    ->orWhereHas('author', function ($q2) use ($search) {
+                        $q2->where('name', 'like', "%{$search}%");
+                    })
+                    ->orWhere('description', 'like', "%{$search}%");
+            });
+        }
+
+        if ($genre = $request->input('genre')) {
+            $genres = is_array($genre) ? $genre : explode(',', $genre);
+            $genres = array_filter(array_map('trim', $genres), fn($v) => $v !== '');
+            if (!empty($genres)) {
+                $query->whereHas('genres', function ($q) use ($genres) {
+                    $q->where(function ($w) use ($genres) {
+                        foreach ($genres as $g) {
+                            if (is_numeric($g)) {
+                                $w->orWhere('genres.id', $g);
+                            } else {
+                                $w->orWhere('genres.name', 'like', "%{$g}%");
+                            }
+                        }
+                    });
+                });
+            }
+        }
+
+        if ($author = $request->input('author')) {
+            $query->whereHas('author', function ($q) use ($author) {
+                if (is_numeric($author)) {
+                    $q->where('id', $author);
+                } else {
+                    $q->where('name', 'like', "%{$author}%");
+                }
+            });
+        }
+
+        if ($reader = $request->input('reader')) {
+            $query->whereHas('reader', function ($q) use ($reader) {
+                if (is_numeric($reader)) {
+                    $q->where('id', $reader);
+                } else {
+                    $q->where('name', 'like', "%{$reader}%");
+                }
+            });
+        }
+
+        if ($seriesId = $request->input('series_id')) {
+            $ids = is_array($seriesId) ? $seriesId : explode(',', $seriesId);
+            $ids = array_filter(array_map('trim', $ids), fn($v) => $v !== '');
+            if (!empty($ids)) {
+                $query->whereIn('series_id', $ids);
+            }
+        }
+
+        if ($sort = $request->input('sort')) {
+            if ($sort === 'new') {
+                $query->orderBy('created_at', 'desc');
+            } elseif ($sort === 'title') {
+                $query->orderBy('title');
+            } elseif ($sort === 'duration') {
+                $query->orderBy('duration', 'desc');
+            }
+        } else {
+            $query->orderBy('created_at', 'desc');
+        }
+
+        $perPage = intval($request->input('per_page', 20));
+        $books = $query->paginate($perPage)->withQueryString();
+
+        $result = [
             'current_page' => $books->currentPage(),
-            'total' => $books->total(),
-            'data' => $books->map(function ($book) {
+            'last_page'    => $books->lastPage(),
+            'per_page'     => $books->perPage(),
+            'total'        => $books->total(),
+            'data'         => $books->map(function ($book) {
                 return [
-                    'id' => $book->id,
-                    'title' => $book->title,
-                    'author' => $book->author?->name,
-                    'cover_url' => $book->cover_url ? Storage::disk('s3')->url($book->cover_url) : null,
-                    'duration' => $book->duration,
+                    'id'          => $book->id,
+                    'title'       => $book->title,
+                    'author'      => $book->author?->name,
+                    'reader'      => $book->reader?->name,
+                    'description' => $book->description,
+                    'duration'    => $book->duration,
+                    'cover_url'   => $book->cover_url ? Storage::disk('s3')->url($book->cover_url) : null,
+                    'thumb_url'   => $book->thumb_url ? Storage::disk('s3')->url($book->thumb_url) : null,
+                    'genres'      => $book->genres->map(function ($genre) {
+                        return [
+                            'id'   => $genre->id,
+                            'name' => $genre->name,
+                        ];
+                    })->values(),
+                    'series'      => $book->series?->title,
+                    'series_id'   => $book->series_id,
                 ];
             }),
-        ]);
+        ];
+
+        return response()->json($result, 200, [], JSON_UNESCAPED_UNICODE);
     }
 
     public function apiShow($id)
     {
-        $book = ABook::with(['author', 'reader', 'genres'])->findOrFail($id);
-        return response()->json([
-            'id' => $book->id,
-            'title' => $book->title,
-            'author' => $book->author?->name,
-            'cover_url' => $book->cover_url ? Storage::disk('s3')->url($book->cover_url) : null,
+        $book = ABook::with(['author', 'reader', 'genres', 'series', 'agency'])->findOrFail($id);
+
+        $result = [
+            'id'          => $book->id,
+            'title'       => $book->title,
+            'author'      => $book->author?->name,
+            'reader'      => $book->reader?->name,
             'description' => $book->description,
-        ]);
+            'duration'    => $book->duration,
+            'cover_url'   => $book->cover_url ? Storage::disk('s3')->url($book->cover_url) : null,
+            'thumb_url'   => $book->thumb_url ? Storage::disk('s3')->url($book->thumb_url) : null,
+            'genres'      => $book->genres->map(function ($genre) {
+                return [
+                    'id'   => $genre->id,
+                    'name' => $genre->name,
+                ];
+            })->values(),
+            'series'      => $book->series?->title,
+            'series_id'   => $book->series_id,
+        ];
+
+        return response()->json($result, 200, [], JSON_UNESCAPED_UNICODE);
     }
 
-    /**
-     * 🔥 ГІБРИДНІ ПОСИЛАННЯ ДЛЯ ПЛЕЄРА
-     */
     public function apiChapters($id)
     {
-        $chapters = AChapter::where('a_book_id', $id)->orderBy('order')->get();
+        $book = ABook::findOrFail($id);
 
-        $data = $chapters->map(function ($chapter) {
-            // Перевіряємо формат у базі
-            $isHls = str_ends_with($chapter->audio_path, '.m3u8');
-            
-            // Якщо HLS — додаємо в кінець плейлист, щоб плеєр зрозумів формат
-            // Якщо MP3 — даємо базове посилання
-            $url = $isHls 
-                ? url("/audio/{$chapter->id}/index.m3u8") 
-                : url("/audio/{$chapter->id}");
+        $chapters = AChapter::where('a_book_id', $book->id)
+            ->orderBy('order')
+            ->get()
+            ->map(function ($chapter) {
+                return [
+                    'id'        => $chapter->id,
+                    'duration'  => $chapter->duration,
+                    'title'     => $chapter->title,
+                    'order'     => $chapter->order,
+                    'audio_url' => $chapter->audio_path ? url('/audio/' . $chapter->id) : null,
+                ];
+            })->values();
 
-            return [
-                'id' => $chapter->id,
-                'title' => $chapter->title,
-                'duration' => $chapter->duration,
-                'order' => $chapter->order,
-                'audio_url' => $url,
-            ];
-        });
-
-        return response()->json($data, 200, [], JSON_UNESCAPED_UNICODE);
+        return response()->json($chapters, 200, [], JSON_UNESCAPED_UNICODE);
     }
 }
