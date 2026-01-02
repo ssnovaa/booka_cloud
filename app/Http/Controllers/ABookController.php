@@ -79,14 +79,18 @@ class ABookController extends Controller
     // Збереження (Конвертація в HLS та завантаження в R2)
     public function store(Request $request)
     {
+        // 🔥 ОПТИМІЗАЦІЯ ДЛЯ ВЕЛИКИХ ФАЙЛІВ
+        set_time_limit(0); // Знімаємо обмеження за часом виконання
+        ini_set('memory_limit', '1024M'); // Виділяємо 1 ГБ оперативної пам'яті
+
         $validated = $request->validate([
             'title' => 'required|string|max:255',
-            'author' => 'nullable|string|max:255', // Зроблено nullable
+            'author' => 'nullable|string|max:255',
             'reader_id' => 'nullable|exists:readers,id',
             'series_id' => 'nullable|exists:series,id',
             'agency_id' => 'nullable|exists:agencies,id',
             'description' => 'nullable|string',
-            'genres' => 'nullable|array', // Зроблено nullable
+            'genres' => 'nullable|array',
             'genres.*' => 'integer|exists:genres,id',
             'cover_file' => 'required|image|mimes:jpg,jpeg,png',
             'audio_files' => 'required|array',
@@ -142,31 +146,33 @@ class ABookController extends Controller
             $playlistName = "index.m3u8";
             $localPlaylistPath = "{$localHlsFolder}/{$playlistName}";
 
-            // Нарізка аудіо на сегменти по 10 секунд за допомогою FFmpeg
-            $cmd = "ffmpeg -i " . escapeshellarg($tempPath) . " -c:a libmp3lame -b:a 128k -map 0:0 -f hls -hls_time 10 -hls_list_size 0 -hls_segment_filename " . escapeshellarg("{$localHlsFolder}/seg_%03d.ts") . " " . escapeshellarg($localPlaylistPath) . " 2>&1";
+            // 🔥 ПРИСКОРЕНА НАРІЗКА (додано -threads 0 для максимальної швидкості)
+            $cmd = "ffmpeg -i " . escapeshellarg($tempPath) . " -c:a libmp3lame -b:a 128k -map 0:0 -f hls -hls_time 10 -hls_list_size 0 -threads 0 -hls_segment_filename " . escapeshellarg("{$localHlsFolder}/seg_%03d.ts") . " " . escapeshellarg($localPlaylistPath) . " 2>&1";
             shell_exec($cmd);
 
             // Завантажуємо всі файли з тимчасової папки в R2
-            $files = scandir($localHlsFolder);
-            $cloudFolder = "audio/hls/{$book->id}/{$chapterIndex}";
-            
-            foreach ($files as $file) {
-                if ($file === '.' || $file === '..') continue;
-                $cloudPath = "{$cloudFolder}/{$file}";
-                Storage::disk('s3_private')->put($cloudPath, fopen("{$localHlsFolder}/{$file}", 'r+'));
+            if (file_exists($localPlaylistPath)) {
+                $files = scandir($localHlsFolder);
+                $cloudFolder = "audio/hls/{$book->id}/{$chapterIndex}";
+                
+                foreach ($files as $file) {
+                    if ($file === '.' || $file === '..') continue;
+                    $cloudPath = "{$cloudFolder}/{$file}";
+                    Storage::disk('s3_private')->put($cloudPath, fopen("{$localHlsFolder}/{$file}", 'r+'));
+                }
+
+                // Очищення тимчасових локальних файлів
+                array_map('unlink', glob("{$localHlsFolder}/*.*"));
+                rmdir($localHlsFolder);
+
+                AChapter::create([
+                    'a_book_id' => $book->id,
+                    'title' => 'Глава ' . $chapterIndex,
+                    'order' => $chapterIndex,
+                    'audio_path' => "{$cloudFolder}/{$playlistName}",
+                    'duration' => $duration,
+                ]);
             }
-
-            // Очищення тимчасових локальних файлів
-            array_map('unlink', glob("{$localHlsFolder}/*.*"));
-            rmdir($localHlsFolder);
-
-            AChapter::create([
-                'a_book_id' => $book->id,
-                'title' => 'Глава ' . $chapterIndex,
-                'order' => $chapterIndex,
-                'audio_path' => "{$cloudFolder}/{$playlistName}", // Зберігаємо шлях до плейлиста
-                'duration' => $duration,
-            ]);
         }
 
         // Оновлюємо тривалість книги в хвилинах
@@ -190,6 +196,8 @@ class ABookController extends Controller
     // Оновлення
     public function update(Request $request, $id)
     {
+        set_time_limit(0); 
+
         $book = ABook::findOrFail($id);
 
         $validated = $request->validate([
@@ -254,10 +262,8 @@ class ABookController extends Controller
             Storage::disk('s3')->delete($book->thumb_url);
         }
 
-        // Видаляємо всі папки HLS глав з ПРИВАТНОГО R2
         $book->chapters()->each(function ($chapter) {
             if ($chapter->audio_path) {
-                // Видаляємо всю папку, де лежить плейлист і сегменти
                 $folder = dirname($chapter->audio_path);
                 Storage::disk('s3_private')->deleteDirectory($folder);
             }
