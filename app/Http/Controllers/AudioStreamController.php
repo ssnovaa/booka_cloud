@@ -13,15 +13,17 @@ class AudioStreamController extends Controller
 {
     /**
      * Гібридний стрімінг: HLS для нових книг, MP3 для старих.
+     * Підтримує авторизацію через заголовок Bearer або параметр ?token= у URL.
      */
     public function stream(Request $request, $id, $file = null)
     {
-        // 1. --- Авторизація (Bearer або URL-токен) ---
+        // 1. --- Авторизація (Bearer заголовок або URL-токен) ---
         $token = $request->bearerToken() ?? $request->query('token');
 
         if ($token) {
             if ($pat = PersonalAccessToken::findToken($token)) {
                 if ($pat->tokenable) {
+                    // Тимчасово авторизуємо користувача для поточної перевірки
                     Auth::login($pat->tokenable);
                 }
             }
@@ -34,22 +36,24 @@ class AudioStreamController extends Controller
             abort(404, 'Глава не знайдена');
         }
 
-        // 3. --- Захист (перша глава безкоштовно) ---
+        // 3. --- Логіка захисту (перша глава безкоштовна) ---
         $firstChapter = AChapter::where('a_book_id', $chapter->a_book_id)
             ->orderBy('order')
             ->first();
 
+        // Якщо це не перша глава і користувач не зайшов у профіль — доступ заборонено
         if (optional($firstChapter)->id !== (int)$id && !Auth::check()) {
-            abort(403, 'Доступ заборонено');
+            abort(403, 'Доступ дозволено тільки авторизованим користувачам');
         }
 
         $disk = Storage::disk('s3_private');
         $requestedFile = $file;
         $fullPath = "";
 
-        // 4. --- ЛОГІКА ГІБРИДНОГО ВИБОРУ ФАЙЛА ---
+        // 4. --- ЛОГІКА ВИБОРУ ФАЙЛА (Гібридний режим) ---
         if ($requestedFile === null) {
             // Прямий запит (старий стиль: /audio/123)
+            // Віддаємо те, що записано безпосередньо в базі в audio_path
             $fullPath = $chapter->audio_path;
             $requestedFile = basename($fullPath);
         } else {
@@ -57,9 +61,9 @@ class AudioStreamController extends Controller
             $basePath = dirname($chapter->audio_path);
             $fullPath = $basePath . '/' . $requestedFile;
 
-            // 🔥 РОЗУМНИЙ ФОЛБЕК ДЛЯ СТАРИХ ФАЙЛІВ:
-            // Якщо додаток просить index.m3u8, але його немає в папці, 
-            // а в базі шлях веде до .mp3 — віддаємо оригінальний MP3.
+            // 🔥 РОЗУМНИЙ ФОЛБЕК ДЛЯ СТАРИХ КНИГ:
+            // Якщо додаток просить плейлист (index.m3u8), але його фізично немає в хмарі,
+            // а в базі для цієї глави прописаний шлях до .mp3 — віддаємо оригінальний MP3.
             if ($requestedFile === 'index.m3u8' && !$disk->exists($fullPath)) {
                 if (str_ends_with($chapter->audio_path, '.mp3')) {
                     $fullPath = $chapter->audio_path;
@@ -68,21 +72,28 @@ class AudioStreamController extends Controller
             }
         }
 
+        // Кінцева перевірка наявності файлу в R2
         if (!$disk->exists($fullPath)) {
+            Log::error("Стрімінг: Файл не знайдено в R2: " . $fullPath);
             abort(404, 'Аудіофайл не знайдено');
         }
 
-        // 5. --- Віддача контенту ---
+        // 5. --- Формування відповіді ---
+        $fileSize = $disk->size($fullPath);
+        $mimeType = $this->getMimeType($requestedFile);
+
         $headers = [
-            'Content-Type'   => $this->getMimeType($requestedFile),
-            'Content-Length' => $disk->size($fullPath),
+            'Content-Type'   => $mimeType,
+            'Content-Length' => $fileSize,
             'Accept-Ranges'  => 'bytes',
         ];
 
+        // Забороняємо кешування плейлиста, щоб перевірка токена відбувалася щоразу
         if (str_ends_with($requestedFile, '.m3u8')) {
             $headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
         }
 
+        // Потокова віддача файлу
         return response()->stream(function () use ($disk, $fullPath) {
             $stream = $disk->readStream($fullPath);
             if ($stream) {
@@ -92,10 +103,18 @@ class AudioStreamController extends Controller
         }, 200, $headers);
     }
 
+    /**
+     * Визначення MIME-типу за розширенням файлу
+     */
     private function getMimeType($filename)
     {
-        if (str_ends_with($filename, '.m3u8')) return 'application/x-mpegURL';
-        if (str_ends_with($filename, '.ts'))   return 'video/MP2T';
-        return 'audio/mpeg'; // Для .mp3
+        if (str_ends_with($filename, '.m3u8')) {
+            return 'application/x-mpegURL';
+        }
+        if (str_ends_with($filename, '.ts')) {
+            return 'video/MP2T';
+        }
+        // За замовчуванням вважаємо за MP3
+        return 'audio/mpeg';
     }
 }
