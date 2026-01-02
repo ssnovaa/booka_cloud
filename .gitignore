@@ -11,3 +11,4 @@ storage/*.key
 storage/*.json
 
 storage/keys/
+storage/app/temp_hls/

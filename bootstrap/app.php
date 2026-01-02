@@ -12,6 +12,9 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware) {
+        // ✅ Довіряємо всім проксі для коректної роботи HTTPS на Railway
+        $middleware->trustProxies(at: '*');
+
         // ✅ alias для нашей миддлвари "только админ"
         $middleware->alias([
             'admin' => \App\Http\Middleware\EnsureUserIsAdmin::class,
