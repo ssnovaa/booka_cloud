@@ -102,13 +102,17 @@ class AudioStreamController extends Controller
             'Content-Type'   => $mimeType,
             'Content-Length' => $fileSize,
             'Accept-Ranges'  => 'bytes',
+            // 🔥 ДОДАНО CORS: Це дозволяє мобільному плеєру завантажувати сегменти
+            'Access-Control-Allow-Origin' => '*',
+            'Access-Control-Allow-Methods' => 'GET, OPTIONS',
+            'Access-Control-Allow-Headers' => 'Content-Type, Authorization, X-Requested-With',
         ];
 
         // Забороняємо кешування плейлиста
         if (str_ends_with($requestedFile, '.m3u8')) {
             $headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
             
-            // 🔥 777 ЛОГ: Виводимо вміст плейлиста, щоб побачити шляхи до сегментів
+            // 🔥 777 ЛОГ: Виводимо вміст плейлиста
             try {
                 $content = $disk->get($fullPath);
                 Log::info("777_DEBUG: CONTENT OF M3U8:\n" . $content);
