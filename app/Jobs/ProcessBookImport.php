@@ -21,19 +21,24 @@ class ProcessBookImport implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 3600; // 1 час на выполнение задачи
+    public $timeout = 3600;
 
     protected $folderPath;
     protected $progressKey;
+    protected $cancelKey; // 🔥 Додано
 
     public function __construct($folderPath)
     {
         $this->folderPath = $folderPath;
         $this->progressKey = 'import_progress_' . md5($folderPath);
+        $this->cancelKey = 'import_cancel_' . md5($folderPath); // 🔥 Ключ для скасування
     }
 
     public function handle()
     {
+        // Очищаємо прапор скасування на старті, щоб не скасувати нову задачу старим кліком
+        Cache::forget($this->cancelKey);
+
         $diskPrivate = Storage::disk('s3_private');
         $diskPublic = Storage::disk('s3');
 
@@ -86,6 +91,25 @@ class ProcessBookImport implements ShouldQueue
         $totalFiles = count($mp3Files);
 
         foreach ($mp3Files as $file) {
+            // 🔥 ПЕРЕВІРКА СКАСУВАННЯ
+            if (Cache::has($this->cancelKey)) {
+                Log::info("🛑 Import CANCELLED by user: {$bookTitle}");
+                
+                // Видаляємо записи з БД
+                $book->chapters()->delete();
+                $book->delete();
+
+                // Видаляємо обкладинки з хмари (опціонально, але бажано)
+                if ($coverUrl) $diskPublic->delete($coverUrl);
+                if ($thumbUrl) $diskPublic->delete($thumbUrl);
+
+                // Скидаємо прогрес
+                Cache::forget($this->progressKey);
+                Cache::forget($this->cancelKey);
+
+                return; // ⛔ ЗУПИНЯЄМО РОБОТУ
+            }
+
             $progress = round((($order - 1) / $totalFiles) * 100);
             Cache::put($this->progressKey, $progress, 3600);
 
@@ -102,6 +126,16 @@ class ProcessBookImport implements ShouldQueue
 
             $cmd = "ffmpeg -i ".escapeshellarg($localTemp)." -c:a libmp3lame -b:a 128k -f hls -hls_time 10 -hls_list_size 0 -hls_segment_filename ".escapeshellarg("$hlsFolder/seg_%03d.ts")." ".escapeshellarg("$hlsFolder/index.m3u8")." 2>&1";
             shell_exec($cmd);
+
+            // Ще одна перевірка після довгого ffmpeg
+            if (Cache::has($this->cancelKey)) {
+                @unlink($localTemp);
+                array_map('unlink', glob("$hlsFolder/*.*"));
+                @rmdir($hlsFolder);
+                $book->chapters()->delete();
+                $book->delete();
+                return;
+            }
 
             if (file_exists("$hlsFolder/index.m3u8")) {
                 foreach (scandir($hlsFolder) as $f) {

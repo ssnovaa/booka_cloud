@@ -3,23 +3,21 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
-use App\Models\ABook;
-use App\Models\AChapter;
-use App\Models\Author;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
-use Intervention\Image\Laravel\Facades\Image;
-use getID3;
-use App\Jobs\ProcessBookImport; // 🔥 Добавили импорт задачи
+use Illuminate\Support\Facades\Cache;
+use App\Jobs\ProcessBookImport;
 
 class ABookImportController extends Controller
 {
+    /**
+     * Сторінка зі списком папок для імпорту (R2/S3)
+     */
     public function bulkUploadView()
     {
-        Log::info("777_DEBUG: [View] Scanning 'incoming' folder on S3...");
-
+        // Скануємо папку 'incoming' на S3/R2
         $disk = Storage::disk('s3_private');
         
         if (!$disk->exists('incoming')) {
@@ -27,38 +25,22 @@ class ABookImportController extends Controller
         }
 
         $bookDirs = $disk->directories('incoming');
-        Log::info("777_DEBUG: NAMES: " . implode(', ', $bookDirs));
-
         $importList = [];
 
         foreach ($bookDirs as $bookPath) {
             $folderName = basename($bookPath);
-
-            // Игнорируем саму папку incoming, если она попала в список
+            // Пропускаємо саму папку incoming, якщо вона потрапила в список
             if ($folderName === 'incoming') continue;
 
+            // Парсимо назву папки: Автор_НазваКниги
             $parts = explode('_', $folderName, 2);
-            
-            if (count($parts) === 2) {
-                $authorName = trim($parts[0]);
-                $bookTitle = trim($parts[1]);
-            } else {
-                $authorName = 'Невідомий';
-                $bookTitle = trim($folderName);
-            }
+            $authorName = count($parts) === 2 ? trim($parts[0]) : 'Невідомий';
+            $bookTitle = count($parts) === 2 ? trim($parts[1]) : trim($folderName);
 
-            // 🔥 ВИПРАВЛЕННЯ: Шукаємо файли рекурсивно (allFiles замість files)
-            // Це дозволяє бачити MP3 навіть у підпапці "фаилы"
+            // Перевіряємо вміст
             $allFiles = $disk->allFiles($bookPath);
-
-            Log::info("777_DEBUG: Checking $folderName. Found " . count($allFiles) . " files.");
-
-            $mp3Count = collect($allFiles)
-                ->filter(fn($f) => Str::lower(pathinfo($f, PATHINFO_EXTENSION)) === 'mp3')
-                ->count();
-            
-            $hasCover = collect($allFiles)
-                ->contains(fn($f) => in_array(Str::lower(pathinfo($f, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png']));
+            $mp3Count = collect($allFiles)->filter(fn($f) => Str::lower(pathinfo($f, PATHINFO_EXTENSION)) === 'mp3')->count();
+            $hasCover = collect($allFiles)->contains(fn($f) => in_array(Str::lower(pathinfo($f, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png']));
 
             if ($mp3Count > 0) {
                 $importList[] = [
@@ -68,14 +50,15 @@ class ABookImportController extends Controller
                     'files'    => $mp3Count,
                     'hasCover' => $hasCover
                 ];
-            } else {
-                Log::warning("777_DEBUG: Folder $folderName skipped (0 MP3 found).");
             }
         }
 
         return view('admin.abooks.bulk_upload', compact('importList'));
     }
 
+    /**
+     * Запуск імпорту (створення Job)
+     */
     public function import(Request $request)
     {
         $folderPath = $request->input('folder_path');
@@ -84,9 +67,48 @@ class ABookImportController extends Controller
             return back()->with('error', 'Шлях до папки порожній.');
         }
 
-        // 🔥 ВЕСЬ ТЯЖЕЛЫЙ КОД ТЕПЕРЬ ЖИВЕТ ВНУТРИ ЭТОЙ КОМАНДЫ:
+        // Запуск фонової задачі
         ProcessBookImport::dispatch($folderPath);
 
-        return back()->with('success', "Імпорт розпочато у фоновому режимі. Можете закрити сторінку, сервер все дороблять сам.");
+        // Повертаємо 'import_path' у сесію, щоб JS знав, за ким стежити
+        return back()->with([
+            'success' => "Імпорт розпочато у фоновому режимі.",
+            'import_path' => $folderPath 
+        ]);
+    }
+
+    /**
+     * API для перевірки прогресу (викликається через JS fetch)
+     */
+    public function checkProgress(Request $request)
+    {
+        $path = $request->input('path');
+        
+        // Ключ повинен співпадати з тим, що в Job: 'import_progress_' + md5($path)
+        $key = 'import_progress_' . md5($path);
+        
+        // Беремо значення з кешу (якщо нема — 0)
+        $progress = Cache::get($key, 0);
+
+        return response()->json(['progress' => $progress]);
+    }
+
+    /**
+     * API для скасування імпорту
+     */
+    public function cancelImport(Request $request)
+    {
+        $folderPath = $request->input('folder_path');
+        
+        if ($folderPath) {
+            // Створюємо ключ скасування, який перевіряє Job
+            // Час життя ключа — 2 хвилини, цього достатньо, щоб Job його помітив
+            $key = 'import_cancel_' . md5($folderPath);
+            Cache::put($key, true, 120); 
+            
+            Log::info("Користувач запросив скасування імпорту для: {$folderPath}");
+        }
+
+        return response()->json(['status' => 'cancelled']);
     }
 }

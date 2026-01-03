@@ -111,6 +111,12 @@ Route::middleware(['auth', IsAdmin::class])
         Route::post('/abooks/import', [ABookImportController::class, 'import'])->name('abooks.import');
         Route::get('/abooks/import/run', [ABookImportController::class, 'runImport'])->name('abooks.import.run');
         
+        // 🔥 Маршрут для перевірки прогресу (для JS)
+        Route::get('/abooks/import/progress', [ABookImportController::class, 'checkProgress'])->name('abooks.import.progress');
+		
+		// Всередині групи admin. (після abooks.import.progress)
+		Route::post('/abooks/import/cancel', [ABookImportController::class, 'cancelImport'])->name('abooks.import.cancel');
+        
         // Масове завантаження (Drag and Drop)
         Route::get('/abooks/bulk-upload', [ABookImportController::class, 'bulkUploadView'])->name('abooks.bulk-upload');
 
