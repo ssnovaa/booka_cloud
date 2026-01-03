@@ -17,6 +17,9 @@ class AudioStreamController extends Controller
      */
     public function stream(Request $request, $id, $file = null)
     {
+        // 🔥 ЛОГ: Початок запиту
+        Log::info("AUDIO_STREAM: Запит отримано. Chapter ID: $id, Файл: " . ($file ?? 'MP3/Playlist'));
+
         // 1. --- Авторизація (Bearer заголовок або URL-токен) ---
         $token = $request->bearerToken() ?? $request->query('token');
 
@@ -25,6 +28,7 @@ class AudioStreamController extends Controller
                 if ($pat->tokenable) {
                     // Тимчасово авторизуємо користувача для поточної перевірки
                     Auth::login($pat->tokenable);
+                    Log::info("AUDIO_STREAM: Користувач авторизований через токен.");
                 }
             }
         }
@@ -33,6 +37,7 @@ class AudioStreamController extends Controller
         /** @var AChapter|null $chapter */
         $chapter = AChapter::find($id);
         if (!$chapter) {
+            Log::error("AUDIO_STREAM: Главу ID $id не знайдено в базі.");
             abort(404, 'Глава не знайдена');
         }
 
@@ -49,8 +54,11 @@ class AudioStreamController extends Controller
 
             // Якщо це не перша глава і користувач не зайшов у профіль — доступ заборонено
             if (optional($firstChapter)->id !== (int)$id && !Auth::check()) {
+                Log::warning("AUDIO_STREAM: Доступ заборонено для Chapter ID $id (не перша глава і немає авториз).");
                 abort(403, 'Доступ дозволено тільки авторизованим користувачам');
             }
+        } else {
+            Log::info("AUDIO_STREAM: Запит сегмента .ts — перевірку токена пропущено.");
         }
 
         $disk = Storage::disk('s3_private');
@@ -60,7 +68,6 @@ class AudioStreamController extends Controller
         // 4. --- ЛОГІКА ВИБОРУ ФАЙЛА (Гібридний режим) ---
         if ($requestedFile === null) {
             // Прямий запит (старий стиль: /audio/123)
-            // Віддаємо те, що записано безпосередньо в базі в audio_path
             $fullPath = $chapter->audio_path;
             $requestedFile = basename($fullPath);
         } else {
@@ -69,25 +76,26 @@ class AudioStreamController extends Controller
             $fullPath = $basePath . '/' . $requestedFile;
 
             // 🔥 РОЗУМНИЙ ФОЛБЕК ДЛЯ СТАРИХ КНИГ:
-            // Якщо додаток просить плейлист (index.m3u8), але його фізично немає в хмарі,
-            // а в базі для цієї глави прописаний шлях до .mp3 — віддаємо оригінальний MP3.
             if ($requestedFile === 'index.m3u8' && !$disk->exists($fullPath)) {
                 if (str_ends_with($chapter->audio_path, '.mp3')) {
                     $fullPath = $chapter->audio_path;
                     $requestedFile = basename($fullPath);
+                    Log::info("AUDIO_STREAM: Фолбек на MP3 для старого файлу.");
                 }
             }
         }
 
         // Кінцева перевірка наявності файлу в R2
         if (!$disk->exists($fullPath)) {
-            Log::error("Стрімінг: Файл не знайдено в R2: " . $fullPath);
+            Log::error("AUDIO_STREAM: Файл НЕ ЗНАЙДЕНО в R2: " . $fullPath);
             abort(404, 'Аудіофайл не знайдено');
         }
 
         // 5. --- Формування відповіді ---
         $fileSize = $disk->size($fullPath);
         $mimeType = $this->getMimeType($requestedFile);
+
+        Log::info("AUDIO_STREAM: Віддача файлу: $fullPath (MIME: $mimeType, Size: $fileSize)");
 
         $headers = [
             'Content-Type'   => $mimeType,
