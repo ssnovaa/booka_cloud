@@ -15,43 +15,48 @@ use getID3;
 class ABookImportController extends Controller
 {
     /**
-     * Показати список папок у 'incoming' на R2
+     * Показати список папок у 'incoming' (Формат: Автор_Назва)
      */
     public function bulkUploadView()
     {
         $disk = Storage::disk('s3_private');
         
-        // Переконаємось, що папка incoming існує
         if (!$disk->exists('incoming')) {
             $disk->makeDirectory('incoming');
         }
 
-        // Отримуємо список авторів (папок)
-        $authorDirs = $disk->directories('incoming');
+        // Отримуємо список папок одразу в incoming (книги)
+        $bookDirs = $disk->directories('incoming');
         $importList = [];
 
-        foreach ($authorDirs as $authorPath) {
-            $authorName = basename($authorPath);
+        foreach ($bookDirs as $bookPath) {
+            $folderName = basename($bookPath);
             
-            // Скануємо книги всередині автора
-            $bookDirs = $disk->directories($authorPath);
+            // 🔥 ПАРСИНГ: Розбиваємо назву папки по "_"
+            // Наприклад: "Стівен Кінг_Воно" -> Автор: "Стівен Кінг", Книга: "Воно"
+            $parts = explode('_', $folderName, 2);
             
-            foreach ($bookDirs as $bookPath) {
-                $bookTitle = basename($bookPath);
-                
-                // Рахуємо MP3 файли
-                $files = collect($disk->files($bookPath))
-                    ->filter(fn($f) => Str::lower(pathinfo($f, PATHINFO_EXTENSION)) === 'mp3')
-                    ->count();
+            if (count($parts) === 2) {
+                $authorName = trim($parts[0]);
+                $bookTitle = trim($parts[1]);
+            } else {
+                // Якщо немає підкреслення, вважаємо все назвою, автор невідомий
+                $authorName = 'Невідомий';
+                $bookTitle = trim($folderName);
+            }
 
-                if ($files > 0) {
-                    $importList[] = [
-                        'author' => $authorName,
-                        'title'  => $bookTitle,
-                        'path'   => $bookPath, // Повний шлях: incoming/Author/Book
-                        'files'  => $files
-                    ];
-                }
+            // Рахуємо MP3 файли
+            $files = collect($disk->files($bookPath))
+                ->filter(fn($f) => Str::lower(pathinfo($f, PATHINFO_EXTENSION)) === 'mp3')
+                ->count();
+
+            if ($files > 0) {
+                $importList[] = [
+                    'author' => $authorName,
+                    'title'  => $bookTitle,
+                    'path'   => $bookPath, // Шлях: incoming/Автор_Назва
+                    'files'  => $files
+                ];
             }
         }
 
@@ -64,7 +69,7 @@ class ABookImportController extends Controller
     public function import(Request $request)
     {
         set_time_limit(0);
-        ini_set('memory_limit', '1024M');
+        ini_set('memory_limit', '2048M');
 
         $folderPath = $request->input('folder_path');
         $disk = Storage::disk('s3_private');
@@ -73,10 +78,17 @@ class ABookImportController extends Controller
             return back()->with('error', 'Папку не знайдено або її вже імпортовано.');
         }
 
-        // 1. Розбір шляху
-        $parts = explode('/', $folderPath);
-        $bookTitle = end($parts);
-        $authorName = prev($parts);
+        // 1. Розбір назви папки (Автор_Назва)
+        $folderName = basename($folderPath);
+        $parts = explode('_', $folderName, 2);
+
+        if (count($parts) === 2) {
+            $authorName = trim($parts[0]);
+            $bookTitle = trim($parts[1]);
+        } else {
+            $authorName = 'Невідомий';
+            $bookTitle = trim($folderName);
+        }
 
         Log::info("📥 Початок імпорту: $bookTitle (Автор: $authorName)");
 
@@ -87,7 +99,7 @@ class ABookImportController extends Controller
             'title'       => $bookTitle,
             'author_id'   => $author->id,
             'description' => 'Імпортовано автоматично з R2',
-            'cover_url'   => null, // Поки без обкладинки
+            'cover_url'   => null,
         ]);
 
         // 3. Обробка файлів
@@ -106,7 +118,7 @@ class ABookImportController extends Controller
         foreach ($mp3Files as $file) {
             $fileName = basename($file);
             
-            // Завантажуємо на сервер для обробки
+            // Завантажуємо на сервер для нарізки
             $localTempPath = storage_path("app/temp_import/{$book->id}_{$order}.mp3");
             if (!file_exists(dirname($localTempPath))) mkdir(dirname($localTempPath), 0777, true);
             
@@ -122,11 +134,10 @@ class ABookImportController extends Controller
             if (!file_exists($localHlsFolder)) mkdir($localHlsFolder, 0777, true);
 
             $playlistName = "index.m3u8";
-            // ffmpeg cmd
             $cmd = "ffmpeg -i " . escapeshellarg($localTempPath) . " -c:a libmp3lame -b:a 128k -map 0:0 -f hls -hls_time 10 -hls_list_size 0 -threads 0 -hls_segment_filename " . escapeshellarg("{$localHlsFolder}/seg_%03d.ts") . " " . escapeshellarg("{$localHlsFolder}/{$playlistName}") . " 2>&1";
             shell_exec($cmd);
 
-            // Завантаження HLS в R2 (audio/hls/...)
+            // Завантаження HLS в R2
             $cloudFolder = "audio/hls/{$book->id}/{$order}";
             $filesInHls = scandir($localHlsFolder);
 
@@ -154,7 +165,7 @@ class ABookImportController extends Controller
 
         $book->update(['duration' => (int) round($totalSeconds / 60)]);
 
-        // 4. Опціонально: видалити вихідну папку з incoming, щоб не дублювати
+        // 4. Опціонально: видалити вихідну папку
         // $disk->deleteDirectory($folderPath);
 
         return back()->with('success', "Книга '{$bookTitle}' імпортована! (ID: {$book->id})");

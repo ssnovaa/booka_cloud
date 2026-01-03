@@ -11,11 +11,10 @@
                     <div class="flex">
                         <div class="ml-3">
                             <p class="text-sm text-blue-700">
-                                <strong>Як це працює:</strong><br>
-                                1. Відкрийте <b>CyberDuck</b> або FileZilla.<br>
-                                2. Підключіться до вашого R2 бакета.<br>
-                                3. Завантажте папки з книгами у папку <code>incoming</code>.<br>
-                                4. Структура: <code>incoming / Автор / Назва Книги / 01.mp3</code>
+                                <strong>Правильна структура папок:</strong><br>
+                                <code>incoming / Автор_Назва Книги / файли.mp3</code><br><br>
+                                Наприклад: <code>incoming / Стівен Кінг_Воно / 01.mp3</code><br>
+                                Система автоматично розділить назву по символу "<b>_</b>".
                             </p>
                         </div>
                     </div>
@@ -37,14 +36,14 @@
                     @if(empty($importList))
                         <div class="text-center py-12 text-gray-500">
                             <p class="text-lg">Папка <code>incoming</code> порожня.</p>
-                            <p class="text-sm mt-2">Завантажте файли через FTP/S3 клієнт і оновіть сторінку.</p>
+                            <p class="text-sm mt-2">Завантажте папку виду <code>Автор_Назва</code> через FTP і оновіть сторінку.</p>
                         </div>
                     @else
                         <table class="min-w-full bg-white border border-gray-200">
                             <thead>
                                 <tr class="bg-gray-100 text-gray-600 uppercase text-sm leading-normal">
-                                    <th class="py-3 px-6 text-left">Автор</th>
-                                    <th class="py-3 px-6 text-left">Назва книги</th>
+                                    <th class="py-3 px-6 text-left">Розпізнаний Автор</th>
+                                    <th class="py-3 px-6 text-left">Розпізнана Книга</th>
                                     <th class="py-3 px-6 text-center">Файлів</th>
                                     <th class="py-3 px-6 text-center">Дія</th>
                                 </tr>
@@ -55,13 +54,13 @@
                                         <td class="py-3 px-6 text-left whitespace-nowrap font-medium">{{ $item['author'] }}</td>
                                         <td class="py-3 px-6 text-left">{{ $item['title'] }}</td>
                                         <td class="py-3 px-6 text-center">
-                                            <span class="bg-gray-200 text-gray-700 py-1 px-3 rounded-full text-xs">{{ $item['files'] }} mp3</span>
+                                            <span class="bg-gray-200 text-gray-700 py-1 px-3 rounded-full text-xs font-bold">{{ $item['files'] }} mp3</span>
                                         </td>
                                         <td class="py-3 px-6 text-center">
-                                            <form action="{{ route('abooks.import') }}" method="POST" onsubmit="return confirm('Почати імпорт книги \'{{ $item['title'] }}\'? Це може зайняти декілька хвилин.')">
+                                            <form action="{{ route('admin.abooks.import') }}" method="POST" onsubmit="return confirm('Імпортувати: {{ $item['author'] }} - {{ $item['title'] }}?')">
                                                 @csrf
                                                 <input type="hidden" name="folder_path" value="{{ $item['path'] }}">
-                                                <button type="submit" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded transition">
+                                                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded shadow transition">
                                                     Імпортувати
                                                 </button>
                                             </form>
