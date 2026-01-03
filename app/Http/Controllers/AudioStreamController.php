@@ -17,10 +17,19 @@ class AudioStreamController extends Controller
      */
     public function stream(Request $request, $id, $file = null)
     {
+        // 1. 🔥 ОБРОБКА PREFLIGHT (OPTIONS)
+        // Це необхідно, щоб плеєр не отримував 405 помилку перед завантаженням
+        if ($request->isMethod('OPTIONS')) {
+            return response('', 200)
+                ->header('Access-Control-Allow-Origin', '*')
+                ->header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+                ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+        }
+
         // 🔥 777 ЛОГ: Початок запиту
         Log::info("777_DEBUG: Request Start. ID: $id, File: " . ($file ?? 'Playlist/MP3'));
 
-        // 1. --- Авторизація (Bearer заголовок або URL-токен) ---
+        // 2. --- Авторизація (Bearer заголовок або URL-токен) ---
         $token = $request->bearerToken() ?? $request->query('token');
 
         if ($token) {
@@ -35,7 +44,7 @@ class AudioStreamController extends Controller
             }
         }
 
-        // 2. --- Пошук глави ---
+        // 3. --- Пошук глави ---
         /** @var AChapter|null $chapter */
         $chapter = AChapter::find($id);
         if (!$chapter) {
@@ -43,32 +52,27 @@ class AudioStreamController extends Controller
             abort(404, 'Глава не знайдена');
         }
 
-        // 3. --- Логіка захисту (перша глава безкоштовна) ---
+        // 4. --- Логіка захисту (перша глава безкоштовна) ---
         
-        // Дозволяємо доступ до сегментів (.ts) без перевірки токена, 
-        // оскільки плейлист (.m3u8) уже захищений.
-        $isSegment = $file && str_ends_with($file, '.ts');
+        // 🛑 ЗМІНА: Ми прибрали перевірку $isSegment. 
+        // Тепер перевіряємо права доступу ЗАВЖДИ, навіть для .ts файлів.
+        
+        $firstChapter = AChapter::where('a_book_id', $chapter->a_book_id)
+            ->orderBy('order')
+            ->first();
 
-        if (!$isSegment) {
-            $firstChapter = AChapter::where('a_book_id', $chapter->a_book_id)
-                ->orderBy('order')
-                ->first();
-
-            // Якщо це не перша глава і користувач не зайшов у профіль — доступ заборонено
-            if (optional($firstChapter)->id !== (int)$id && !Auth::check()) {
-                Log::warning("777_DEBUG: Access DENIED for Chapter $id (Unauthorized).");
-                abort(403, 'Доступ дозволено тільки авторизованим користувачам');
-            }
-            Log::info("777_DEBUG: Access GRANTED (Playlist or First Chapter).");
-        } else {
-            Log::info("777_DEBUG: Segment .ts requested. Skipping token check.");
+        // Якщо це не перша глава і користувач не зайшов у профіль — доступ заборонено
+        if (optional($firstChapter)->id !== (int)$id && !Auth::check()) {
+            Log::warning("777_DEBUG: Access DENIED for Chapter $id (Unauthorized).");
+            abort(403, 'Доступ дозволено тільки авторизованим користувачам');
         }
+        Log::info("777_DEBUG: Access GRANTED.");
 
         $disk = Storage::disk('s3_private');
         $requestedFile = $file;
         $fullPath = "";
 
-        // 4. --- ЛОГІКА ВИБОРУ ФАЙЛА (Гібридний режим) ---
+        // 5. --- ЛОГІКА ВИБОРУ ФАЙЛА (Гібридний режим) ---
         if ($requestedFile === null) {
             // Прямий запит (старий стиль: /audio/123)
             $fullPath = $chapter->audio_path;
@@ -94,7 +98,7 @@ class AudioStreamController extends Controller
             abort(404, 'Аудіофайл не знайдено');
         }
 
-        // 5. --- Формування відповіді ---
+        // 6. --- Формування відповіді ---
         $fileSize = $disk->size($fullPath);
         $mimeType = $this->getMimeType($requestedFile);
 
@@ -108,26 +112,35 @@ class AudioStreamController extends Controller
             'Access-Control-Allow-Headers' => 'Content-Type, Authorization, X-Requested-With',
         ];
 
-        // Забороняємо кешування плейлиста та додаємо АБСОЛЮТНІ шляхи
+        // Забороняємо кешування плейлиста та додаємо АБСОЛЮТНІ шляхи + ТОКЕН
         if (str_ends_with($requestedFile, '.m3u8')) {
             $headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
             
             try {
                 $content = $disk->get($fullPath);
 
-                // 🔥 ВСТАВКА ДЛЯ АБСОЛЮТНИХ ШЛЯХІВ 🔥
+                // 🔥 ВСТАВКА: АБСОЛЮТНІ ШЛЯХИ + ТОКЕН 🔥
+                
                 // 1. Формуємо базовий URL (наприклад: https://app.booka.top/audio/123/)
                 $baseUrl = url("/audio/{$id}") . '/';
 
-                // 2. Замінюємо відносні "seg_" на абсолютні "https://.../seg_"
-                $modifiedContent = str_replace('seg_', $baseUrl . 'seg_', $content);
+                // 2. Готуємо параметр токена, якщо він є
+                $tokenQuery = $token ? "?token={$token}" : "";
 
-                // 3. Оновлюємо розмір контенту (бо текст змінився)
+                // 3. Замінюємо "seg_001.ts" на "https://.../seg_001.ts?token=..."
+                // Це дозволяє плеєру качати захищені сегменти
+                $modifiedContent = preg_replace(
+                    '/(seg_.*\.ts)/', 
+                    $baseUrl . '$1' . $tokenQuery, 
+                    $content
+                );
+
+                // 4. Оновлюємо розмір контенту
                 $headers['Content-Length'] = strlen($modifiedContent);
 
-                Log::info("777_DEBUG: Rewritten M3U8 with absolute paths. Base: $baseUrl");
+                Log::info("777_DEBUG: Rewritten M3U8 with absolute paths & token.");
 
-                // 4. Віддаємо змінений контент як рядок
+                // 5. Віддаємо змінений контент як рядок
                 return response($modifiedContent, 200, $headers);
 
             } catch (\Exception $e) {
