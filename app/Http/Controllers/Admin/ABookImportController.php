@@ -30,9 +30,12 @@ class ABookImportController extends Controller
             Log::info("777_DEBUG: [View] 'incoming' folder created.");
         }
 
-        $bookDirs = $disk->directories('incoming');
-        $importList = [];
-        Log::info("777_DEBUG: [View] Found " . count($bookDirs) . " folders.");
+$bookDirs = $disk->directories('incoming');
+// 🔥 ДОБАВЛЯЕМ ЭТУ СТРОКУ:
+Log::info("777_DEBUG: NAMES: " . implode(', ', $bookDirs)); 
+
+$importList = [];
+Log::info("777_DEBUG: [View] Found " . count($bookDirs) . " folders.");
 
         foreach ($bookDirs as $bookPath) {
             $folderName = basename($bookPath);
