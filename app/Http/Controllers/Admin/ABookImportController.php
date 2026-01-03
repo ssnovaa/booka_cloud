@@ -47,7 +47,6 @@ class ABookImportController extends Controller
             }
 
             // 🔥 ВИПРАВЛЕННЯ: Шукаємо файли рекурсивно (allFiles замість files)
-            // Це дозволяє бачити MP3 навіть у підпапці "фаилы"
             $allFiles = $disk->allFiles($bookPath);
 
             Log::info("777_DEBUG: Checking $folderName. Found " . count($allFiles) . " files.");
@@ -71,6 +70,11 @@ class ABookImportController extends Controller
                 Log::warning("777_DEBUG: Folder $folderName skipped (0 MP3 found).");
             }
         }
+
+        // 🔥🔥🔥 ТЕСТОВИЙ РЯДОК ДЛЯ ДІАГНОСТИКИ 🔥🔥🔥
+        // Це зупинить виконання і покаже дані на екрані.
+        // Якщо побачите дані - проблема в HTML. Якщо [], проблема в файлах.
+        dd($importList);
 
         return view('admin.abooks.bulk_upload', compact('importList'));
     }
