@@ -10,7 +10,7 @@ use App\Http\Controllers\AuthorController;
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\FavoriteApiController;
-use App\Http\Controllers\Api\UserApiController;       // кабинет/профиль
+use App\Http\Controllers\Api\UserApiController;        // кабинет/профиль
 use App\Http\Controllers\ListenController;             // прогресс прослушивания
 
 // Серии
@@ -121,6 +121,11 @@ Route::get('/abooks', [ABookController::class, 'apiIndex']);
 Route::get('/abooks/{id}', [ABookController::class, 'apiShow'])->whereNumber('id');
 Route::get('/abooks/{id}/chapters', [ABookController::class, 'apiChapters'])->whereNumber('id');
 
+// 🔥 АУДИО СТРИМИНГ (HLS + MP3)
+// Используем any, чтобы пропустить OPTIONS запросы (CORS fix)
+Route::any('/audio/{id}/{file?}', [App\Http\Controllers\AudioStreamController::class, 'stream'])
+    ->where('file', '.*');
+
 Route::get('/genres', [GenreController::class, 'apiIndex']);
 Route::get('/authors', [AuthorController::class, 'apiIndex']);
 
@@ -160,7 +165,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     
     // обратная совместимость
     Route::post('/listen/update', [ListenController::class, 'update'])->middleware('throttle:60,1');
-    Route::get('/listen',          [ListenController::class, 'index']);
+    Route::get('/listen',           [ListenController::class, 'index']);
     Route::get('/listened-books', [ListenController::class, 'listenedBooks']);
 
     // Push (тест/удаление)
