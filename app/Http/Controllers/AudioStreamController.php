@@ -108,16 +108,30 @@ class AudioStreamController extends Controller
             'Access-Control-Allow-Headers' => 'Content-Type, Authorization, X-Requested-With',
         ];
 
-        // Забороняємо кешування плейлиста
+        // Забороняємо кешування плейлиста та додаємо АБСОЛЮТНІ шляхи
         if (str_ends_with($requestedFile, '.m3u8')) {
             $headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
             
-            // 🔥 777 ЛОГ: Виводимо вміст плейлиста
             try {
                 $content = $disk->get($fullPath);
-                Log::info("777_DEBUG: CONTENT OF M3U8:\n" . $content);
+
+                // 🔥 ВСТАВКА ДЛЯ АБСОЛЮТНИХ ШЛЯХІВ 🔥
+                // 1. Формуємо базовий URL (наприклад: https://app.booka.top/audio/123/)
+                $baseUrl = url("/audio/{$id}") . '/';
+
+                // 2. Замінюємо відносні "seg_" на абсолютні "https://.../seg_"
+                $modifiedContent = str_replace('seg_', $baseUrl . 'seg_', $content);
+
+                // 3. Оновлюємо розмір контенту (бо текст змінився)
+                $headers['Content-Length'] = strlen($modifiedContent);
+
+                Log::info("777_DEBUG: Rewritten M3U8 with absolute paths. Base: $baseUrl");
+
+                // 4. Віддаємо змінений контент як рядок
+                return response($modifiedContent, 200, $headers);
+
             } catch (\Exception $e) {
-                Log::error("777_DEBUG: Failed to read m3u8 content: " . $e->getMessage());
+                Log::error("777_DEBUG: Failed to rewrite m3u8 content: " . $e->getMessage());
             }
         }
 
