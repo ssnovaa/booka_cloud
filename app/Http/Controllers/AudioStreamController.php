@@ -17,8 +17,8 @@ class AudioStreamController extends Controller
      */
     public function stream(Request $request, $id, $file = null)
     {
-        // 🔥 ЛОГ: Початок запиту
-        Log::info("AUDIO_STREAM: Запит отримано. Chapter ID: $id, Файл: " . ($file ?? 'MP3/Playlist'));
+        // 🔥 777 ЛОГ: Початок запиту
+        Log::info("777_DEBUG: Request Start. ID: $id, File: " . ($file ?? 'Playlist/MP3'));
 
         // 1. --- Авторизація (Bearer заголовок або URL-токен) ---
         $token = $request->bearerToken() ?? $request->query('token');
@@ -28,8 +28,10 @@ class AudioStreamController extends Controller
                 if ($pat->tokenable) {
                     // Тимчасово авторизуємо користувача для поточної перевірки
                     Auth::login($pat->tokenable);
-                    Log::info("AUDIO_STREAM: Користувач авторизований через токен.");
+                    Log::info("777_DEBUG: User ID " . $pat->tokenable->id . " authenticated via token.");
                 }
+            } else {
+                Log::warning("777_DEBUG: Token present but NOT VALID.");
             }
         }
 
@@ -37,14 +39,14 @@ class AudioStreamController extends Controller
         /** @var AChapter|null $chapter */
         $chapter = AChapter::find($id);
         if (!$chapter) {
-            Log::error("AUDIO_STREAM: Главу ID $id не знайдено в базі.");
+            Log::error("777_DEBUG: Chapter $id not found in DB.");
             abort(404, 'Глава не знайдена');
         }
 
         // 3. --- Логіка захисту (перша глава безкоштовна) ---
         
-        // 🔥 ПРАВКА: дозволяємо доступ до сегментів (.ts) без перевірки токена, 
-        // оскільки плейлист (.m3u8) уже захищений. Плеєри часто не передають токен для сегментів.
+        // Дозволяємо доступ до сегментів (.ts) без перевірки токена, 
+        // оскільки плейлист (.m3u8) уже захищений.
         $isSegment = $file && str_ends_with($file, '.ts');
 
         if (!$isSegment) {
@@ -54,11 +56,12 @@ class AudioStreamController extends Controller
 
             // Якщо це не перша глава і користувач не зайшов у профіль — доступ заборонено
             if (optional($firstChapter)->id !== (int)$id && !Auth::check()) {
-                Log::warning("AUDIO_STREAM: Доступ заборонено для Chapter ID $id (не перша глава і немає авториз).");
+                Log::warning("777_DEBUG: Access DENIED for Chapter $id (Unauthorized).");
                 abort(403, 'Доступ дозволено тільки авторизованим користувачам');
             }
+            Log::info("777_DEBUG: Access GRANTED (Playlist or First Chapter).");
         } else {
-            Log::info("AUDIO_STREAM: Запит сегмента .ts — перевірку токена пропущено.");
+            Log::info("777_DEBUG: Segment .ts requested. Skipping token check.");
         }
 
         $disk = Storage::disk('s3_private');
@@ -75,19 +78,19 @@ class AudioStreamController extends Controller
             $basePath = dirname($chapter->audio_path);
             $fullPath = $basePath . '/' . $requestedFile;
 
-            // 🔥 РОЗУМНИЙ ФОЛБЕК ДЛЯ СТАРИХ КНИГ:
+            // РОЗУМНИЙ ФОЛБЕК ДЛЯ СТАРИХ КНИГ:
             if ($requestedFile === 'index.m3u8' && !$disk->exists($fullPath)) {
                 if (str_ends_with($chapter->audio_path, '.mp3')) {
                     $fullPath = $chapter->audio_path;
                     $requestedFile = basename($fullPath);
-                    Log::info("AUDIO_STREAM: Фолбек на MP3 для старого файлу.");
+                    Log::info("777_DEBUG: Fallback to MP3 for old book.");
                 }
             }
         }
 
         // Кінцева перевірка наявності файлу в R2
         if (!$disk->exists($fullPath)) {
-            Log::error("AUDIO_STREAM: Файл НЕ ЗНАЙДЕНО в R2: " . $fullPath);
+            Log::error("777_DEBUG: FILE NOT FOUND IN R2: $fullPath");
             abort(404, 'Аудіофайл не знайдено');
         }
 
@@ -95,18 +98,26 @@ class AudioStreamController extends Controller
         $fileSize = $disk->size($fullPath);
         $mimeType = $this->getMimeType($requestedFile);
 
-        Log::info("AUDIO_STREAM: Віддача файлу: $fullPath (MIME: $mimeType, Size: $fileSize)");
-
         $headers = [
             'Content-Type'   => $mimeType,
             'Content-Length' => $fileSize,
             'Accept-Ranges'  => 'bytes',
         ];
 
-        // Забороняємо кешування плейлиста, щоб перевірка токена відбувалася щоразу
+        // Забороняємо кешування плейлиста
         if (str_ends_with($requestedFile, '.m3u8')) {
             $headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+            
+            // 🔥 777 ЛОГ: Виводимо вміст плейлиста, щоб побачити шляхи до сегментів
+            try {
+                $content = $disk->get($fullPath);
+                Log::info("777_DEBUG: CONTENT OF M3U8:\n" . $content);
+            } catch (\Exception $e) {
+                Log::error("777_DEBUG: Failed to read m3u8 content: " . $e->getMessage());
+            }
         }
+
+        Log::info("777_DEBUG: Streaming file. Path: $fullPath, MIME: $mimeType, Size: $fileSize");
 
         // Потокова віддача файлу
         return response()->stream(function () use ($disk, $fullPath) {
