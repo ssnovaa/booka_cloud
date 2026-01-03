@@ -20,19 +20,22 @@ class ABookImportController extends Controller
      */
     public function bulkUploadView()
     {
+        // 777_DEBUG: Початок сканування
+        Log::info("777_DEBUG: [View] Scanning 'incoming' folder on S3...");
+
         $disk = Storage::disk('s3_private');
         
-        // Создаем папку, если её нет
         if (!$disk->exists('incoming')) {
             $disk->makeDirectory('incoming');
+            Log::info("777_DEBUG: [View] 'incoming' folder created.");
         }
 
         $bookDirs = $disk->directories('incoming');
         $importList = [];
+        Log::info("777_DEBUG: [View] Found " . count($bookDirs) . " folders.");
 
         foreach ($bookDirs as $bookPath) {
             $folderName = basename($bookPath);
-            // Разделяем имя папки по "_"
             $parts = explode('_', $folderName, 2);
             
             if (count($parts) === 2) {
@@ -43,15 +46,12 @@ class ABookImportController extends Controller
                 $bookTitle = trim($folderName);
             }
 
-            // Получаем список всех файлов
             $allFiles = $disk->files($bookPath);
 
-            // Считаем только MP3
             $mp3Count = collect($allFiles)
                 ->filter(fn($f) => Str::lower(pathinfo($f, PATHINFO_EXTENSION)) === 'mp3')
                 ->count();
             
-            // Ищем обложку (jpg, jpeg, png)
             $hasCover = collect($allFiles)
                 ->contains(fn($f) => in_array(Str::lower(pathinfo($f, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png']));
 
@@ -70,7 +70,7 @@ class ABookImportController extends Controller
     }
 
     /**
-     * Импорт выбранной папки
+     * Імпорт обраної папки
      */
     public function import(Request $request)
     {
@@ -78,14 +78,17 @@ class ABookImportController extends Controller
         ini_set('memory_limit', '2048M');
 
         $folderPath = $request->input('folder_path');
+        Log::info("777_DEBUG: [Import] START. Path: $folderPath");
+
         $diskPrivate = Storage::disk('s3_private');
         $diskPublic = Storage::disk('s3');
 
         if (!$folderPath || !$diskPrivate->exists($folderPath)) {
+            Log::error("777_DEBUG: [Import] Folder not found!");
             return back()->with('error', 'Папку не знайдено.');
         }
 
-        // 1. Разбор имени
+        // 1. Розбір назви
         $folderName = basename($folderPath);
         $parts = explode('_', $folderName, 2);
 
@@ -97,9 +100,9 @@ class ABookImportController extends Controller
             $bookTitle = trim($folderName);
         }
 
-        Log::info("📥 Імпорт start: $bookTitle ($authorName)");
+        Log::info("777_DEBUG: [Import] Parsed - Author: $authorName, Book: $bookTitle");
 
-        // 2. Ищем и обрабатываем обложку
+        // 2. Обкладинка
         $allFiles = $diskPrivate->files($folderPath);
         $coverUrl = null;
         $thumbUrl = null;
@@ -107,6 +110,7 @@ class ABookImportController extends Controller
         $imageFile = collect($allFiles)->first(fn($f) => in_array(Str::lower(pathinfo($f, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png']));
 
         if ($imageFile) {
+            Log::info("777_DEBUG: [Import] Found cover image: " . basename($imageFile));
             try {
                 $tempCoverPath = storage_path('app/temp_import/cover_' . time() . '.' . pathinfo($imageFile, PATHINFO_EXTENSION));
                 if (!file_exists(dirname($tempCoverPath))) mkdir(dirname($tempCoverPath), 0777, true);
@@ -116,10 +120,8 @@ class ABookImportController extends Controller
                 $s3CoverName = 'covers/' . time() . '_' . basename($imageFile);
                 $s3ThumbName = 'covers/thumb_' . basename($s3CoverName);
 
-                // Загружаем на публичный диск
                 $diskPublic->put($s3CoverName, fopen($tempCoverPath, 'r+'), 'public');
 
-                // Делаем миниатюру
                 $image = Image::read($tempCoverPath)->cover(200, 300);
                 $diskPublic->put($s3ThumbName, (string) $image->toJpeg(80), 'public');
 
@@ -127,29 +129,35 @@ class ABookImportController extends Controller
                 $thumbUrl = $s3ThumbName;
 
                 @unlink($tempCoverPath);
+                Log::info("777_DEBUG: [Import] Cover uploaded to S3 Public.");
+
             } catch (\Exception $e) {
-                Log::error("Cover error: " . $e->getMessage());
+                Log::error("777_DEBUG: [Import] Cover Error: " . $e->getMessage());
             }
+        } else {
+            Log::info("777_DEBUG: [Import] No cover image found.");
         }
 
-        // 3. Создаем книгу и автора
+        // 3. БД: Автор і Книга
         $author = Author::firstOrCreate(['name' => $authorName]);
         
         $book = ABook::create([
             'title'       => $bookTitle,
             'author_id'   => $author->id,
-            'description' => 'Імпортовано з S3/FTP',
+            'description' => 'Імпортовано автоматично з R2',
             'cover_url'   => $coverUrl,
             'thumb_url'   => $thumbUrl,
         ]);
+        Log::info("777_DEBUG: [Import] Book created. ID: " . $book->id);
 
-        // 4. Обработка MP3 -> HLS
+        // 4. MP3 -> HLS
         $mp3Files = array_filter($allFiles, fn($f) => Str::lower(pathinfo($f, PATHINFO_EXTENSION)) === 'mp3');
-
-        // Сортировка (Натуральная: 1, 2, 10...)
         usort($mp3Files, function($a, $b) {
             return strnatcmp(basename($a), basename($b));
         });
+
+        $totalFiles = count($mp3Files);
+        Log::info("777_DEBUG: [Import] Processing $totalFiles MP3 files...");
 
         $getID3 = new getID3();
         $totalSeconds = 0;
@@ -157,27 +165,29 @@ class ABookImportController extends Controller
 
         foreach ($mp3Files as $file) {
             $fileName = basename($file);
+            Log::info("777_DEBUG: [Import] ($order/$totalFiles) Processing: $fileName");
             
-            // Качаем временно на сервер
+            // Качаємо
             $localTempPath = storage_path("app/temp_import/{$book->id}_{$order}.mp3");
             if (!file_exists(dirname($localTempPath))) mkdir(dirname($localTempPath), 0777, true);
             file_put_contents($localTempPath, $diskPrivate->get($file));
 
-            // Длительность
+            // Тривалість
             $fileInfo = $getID3->analyze($localTempPath);
             $duration = (int) round($fileInfo['playtime_seconds'] ?? 0);
             $totalSeconds += $duration;
 
-            // Конвертация в HLS
+            // HLS
             $localHlsFolder = storage_path("app/temp_hls/{$book->id}/{$order}");
             if (!file_exists($localHlsFolder)) mkdir($localHlsFolder, 0777, true);
 
             $playlistName = "index.m3u8";
-            // Команда ffmpeg
             $cmd = "ffmpeg -i " . escapeshellarg($localTempPath) . " -c:a libmp3lame -b:a 128k -map 0:0 -f hls -hls_time 10 -hls_list_size 0 -threads 0 -hls_segment_filename " . escapeshellarg("{$localHlsFolder}/seg_%03d.ts") . " " . escapeshellarg("{$localHlsFolder}/{$playlistName}") . " 2>&1";
+            
+            // Log::info("777_DEBUG: Executing FFmpeg..."); 
             shell_exec($cmd);
 
-            // Заливаем сегменты обратно в R2
+            // Завантаження HLS
             $cloudFolder = "audio/hls/{$book->id}/{$order}";
             if (file_exists("{$localHlsFolder}/{$playlistName}")) {
                 foreach (scandir($localHlsFolder) as $hlsFile) {
@@ -192,9 +202,11 @@ class ABookImportController extends Controller
                     'audio_path' => "{$cloudFolder}/{$playlistName}",
                     'duration'   => $duration,
                 ]);
+                Log::info("777_DEBUG: [Import] Chapter $order created (Duration: {$duration}s).");
+            } else {
+                Log::error("777_DEBUG: [Import] FFmpeg FAILED for $fileName");
             }
 
-            // Чистим мусор
             @unlink($localTempPath);
             array_map('unlink', glob("{$localHlsFolder}/*.*"));
             @rmdir($localHlsFolder);
@@ -203,7 +215,8 @@ class ABookImportController extends Controller
         }
 
         $book->update(['duration' => (int) round($totalSeconds / 60)]);
+        Log::info("777_DEBUG: [Import] COMPLETED. Total Duration: " . round($totalSeconds / 60) . " min.");
 
-        return back()->with('success', "Книга '{$bookTitle}' успішно імпортована!");
+        return back()->with('success', "Книга '{$bookTitle}' імпортована!");
     }
 }
