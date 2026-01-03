@@ -7,6 +7,7 @@
             Масовий імпорт книг (R2/S3)
         </h2>
 
+        {{-- Сообщения --}}
         @if (session('error'))
             <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4">
                 {{ session('error') }}
@@ -34,14 +35,14 @@
                         </thead>
                         <tbody class="bg-white divide-y divide-gray-200">
                             @foreach($importList as $item)
-                                {{-- Генерируем уникальный ID для строки на основе пути --}}
+                                {{-- Генерируем уникальный ID --}}
                                 @php 
                                     $rowId = md5($item['path']); 
-                                    // Проверяем, является ли эта книга той, что сейчас импортируется
+                                    // Проверяем, активна ли эта книга (передано из контроллера)
                                     $isProcessing = isset($activeImport) && $activeImport['path'] === $item['path'];
                                 @endphp
 
-                                {{-- ОСНОВНАЯ СТРОКА С ИНФОРМАЦИЕЙ --}}
+                                {{-- ОСНОВНАЯ СТРОКА --}}
                                 <tr id="row-main-{{ $rowId }}" class="{{ $isProcessing ? 'bg-blue-50' : '' }}">
                                     <td class="px-6 py-4 whitespace-nowrap font-medium">{{ $item['author'] }}</td>
                                     <td class="px-6 py-4 whitespace-nowrap">{{ $item['title'] }}</td>
@@ -54,7 +55,7 @@
                                         @endif
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-right">
-                                        {{-- Кнопка "Импортировать" (скрываем, если процесс уже идет) --}}
+                                        {{-- Кнопка Импорт --}}
                                         <form action="{{ route('admin.abooks.import') }}" method="POST" class="{{ $isProcessing ? 'hidden' : '' }}" id="form-{{ $rowId }}">
                                             @csrf
                                             <input type="hidden" name="folder_path" value="{{ $item['path'] }}">
@@ -63,32 +64,40 @@
                                             </button>
                                         </form>
 
-                                        {{-- Если процесс уже идет при загрузке страницы, показываем статус --}}
+                                        {{-- Бейдж статуса --}}
                                         <div id="status-badge-{{ $rowId }}" class="{{ $isProcessing ? '' : 'hidden' }}">
                                             <span class="text-blue-600 font-bold animate-pulse">ОБРОБКА...</span>
                                         </div>
                                     </td>
                                 </tr>
 
-                                {{-- СКРЫТАЯ СТРОКА ПРОГРЕССА (раскрывается JS-ом) --}}
+                                {{-- СТРОКА ПРОГРЕССА (Скрытая) --}}
                                 <tr id="row-progress-{{ $rowId }}" class="{{ $isProcessing ? '' : 'hidden' }} bg-gray-50 shadow-inner">
                                     <td colspan="5" class="px-6 py-4">
                                         <div class="flex items-center justify-between">
+                                            {{-- Полоска --}}
                                             <div class="w-full mr-4">
                                                 <div class="flex justify-between mb-1">
-                                                    <span class="text-sm font-medium text-blue-700 dark:text-white" id="progress-text-{{ $rowId }}">Ініціалізація...</span>
-                                                    <span class="text-sm font-medium text-blue-700 dark:text-white" id="progress-percent-{{ $rowId }}">0%</span>
+                                                    <span class="text-sm font-medium text-blue-700 dark:text-white" id="progress-text-{{ $rowId }}">
+                                                        {{ $isProcessing ? 'Відновлення...' : 'Ініціалізація...' }}
+                                                    </span>
+                                                    <span class="text-sm font-medium text-blue-700 dark:text-white" id="progress-percent-{{ $rowId }}">
+                                                        {{ $isProcessing ? $activeImport['progress'] : 0 }}%
+                                                    </span>
                                                 </div>
                                                 <div class="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700">
-                                                    <div id="progress-bar-{{ $rowId }}" class="bg-blue-600 h-2.5 rounded-full transition-all duration-500" style="width: {{ $isProcessing ? $activeImport['progress'] : 0 }}%"></div>
+                                                    <div id="progress-bar-{{ $rowId }}" 
+                                                         class="bg-blue-600 h-2.5 rounded-full transition-all duration-500" 
+                                                         style="width: {{ $isProcessing ? $activeImport['progress'] : 0 }}%">
+                                                    </div>
                                                 </div>
                                             </div>
                                             
-                                            {{-- Кнопка отмены --}}
+                                            {{-- Кнопка Стоп --}}
                                             <button type="button" 
                                                     id="btn-cancel-{{ $rowId }}"
                                                     onclick="cancelImport('{{ $item['path'] }}', '{{ $rowId }}')"
-                                                    class="text-red-600 hover:text-red-900 font-bold text-sm border border-red-200 hover:bg-red-50 px-3 py-1 rounded">
+                                                    class="text-red-600 hover:text-red-900 font-bold text-sm border border-red-200 hover:bg-red-50 px-3 py-1 rounded whitespace-nowrap">
                                                 Стоп
                                             </button>
                                         </div>
@@ -107,7 +116,7 @@
 
 {{-- ЛОГИКА JS --}}
 @php
-    // Определяем, какую книгу нужно мониторить при загрузке страницы
+    // Если был редирект с сессией ИЛИ контроллер нашел активный импорт в кеше
     $activePath = session('import_path') ?? ($activeImport['path'] ?? null);
     $activeHash = $activePath ? md5($activePath) : null;
 @endphp
@@ -115,17 +124,15 @@
 @if($activePath)
 <script>
     document.addEventListener('DOMContentLoaded', function() {
-        const activePath = "{{ $activePath }}";
-        const rowId = "{{ $activeHash }}"; // ID строки (хеш)
-        
-        startMonitoring(activePath, rowId);
+        // Авто-старт мониторинга при загрузке страницы
+        startMonitoring("{{ $activePath }}", "{{ $activeHash }}");
     });
 </script>
 @endif
 
 <script>
     function startMonitoring(folderPath, rowId) {
-        // 1. Показываем строку прогресса, скрываем кнопку
+        // 1. Показываем UI элементы
         const progressRow = document.getElementById(`row-progress-${rowId}`);
         const mainRow = document.getElementById(`row-main-${rowId}`);
         const formBtn = document.getElementById(`form-${rowId}`);
@@ -139,22 +146,21 @@
         if(progressRow) progressRow.classList.remove('hidden');
         if(formBtn) formBtn.classList.add('hidden');
         if(statusBadge) statusBadge.classList.remove('hidden');
-        if(mainRow) mainRow.classList.add('bg-blue-50'); // Подсветка активной строки
+        if(mainRow) mainRow.classList.add('bg-blue-50');
 
-        // 2. Запускаем интервал
+        // 2. Запускаем опрос сервера
         let interval = setInterval(() => {
-            // Используем fetch к нашему API
             fetch(`/admin/abooks/import/progress?path=${encodeURIComponent(folderPath)}`)
                 .then(response => response.json())
                 .then(data => {
                     const percent = data.progress;
                     
-                    // Обновляем UI
+                    // Обновляем полоску
                     if (progressBar) progressBar.style.width = percent + '%';
                     if (progressPercent) progressPercent.innerText = percent + '%';
                     if (progressText) progressText.innerText = `Обробка: ${percent}%`;
 
-                    // Если завершено (100%)
+                    // Если 100% — успех
                     if (percent >= 100) {
                         clearInterval(interval);
                         
@@ -166,22 +172,20 @@
                             progressText.innerText = "Успішно імпортовано!";
                             progressText.classList.add('text-green-600');
                         }
-                        if(btnCancel) btnCancel.classList.add('hidden'); // Убираем кнопку отмены
+                        if(btnCancel) btnCancel.classList.add('hidden'); // Убираем кнопку Стоп
                         
-                        // Через 2 секунды перезагружаем страницу, чтобы книга исчезла из списка
+                        // Перезагрузка через 2 секунды
                         setTimeout(() => {
                             window.location.href = "{{ route('admin.abooks.bulk-upload') }}"; 
                         }, 2000);
                     }
                 })
                 .catch(err => {
-                    console.error("Ошибка мониторинга:", err);
-                    // Не останавливаем интервал сразу, вдруг это просто сбой сети
+                    console.error("Помилка:", err);
                 });
-        }, 2000); // Опрос каждые 2 секунды
+        }, 10000); // <--- ВАЖНО: 10 секунд (10000 мс)
     }
 
-    // Функция отмены (вызывается по клику на кнопку "Стоп")
     function cancelImport(folderPath, rowId) {
         if (!confirm('Ви точно хочете зупинити імпорт цієї книги?')) return;
 
@@ -192,7 +196,7 @@
             btnCancel.disabled = true;
             btnCancel.innerText = "Зупиняємо...";
         }
-        if(progressText) progressText.innerText = "Відправка команди скасування...";
+        if(progressText) progressText.innerText = "Відправка команди...";
 
         fetch('{{ route('admin.abooks.import.cancel') }}', {
             method: 'POST',
@@ -205,7 +209,7 @@
         .then(response => response.json())
         .then(data => {
             alert('Імпорт скасовано.');
-            window.location.reload(); // Перезагружаем страницу, чтобы сбросить вид
+            window.location.reload(); 
         })
         .catch(err => {
             console.error(err);

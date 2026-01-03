@@ -111,6 +111,8 @@ class ProcessBookImport implements ShouldQueue
             }
 
             $progress = round((($order - 1) / $totalFiles) * 100);
+			// 🔥 ОТЛАДКА: Пишем в лог
+			Log::info("JOB DEBUG: Writing Progress. Key: {$this->progressKey}, Value: {$progress}%");
             Cache::put($this->progressKey, $progress, 3600);
 
             $localTemp = storage_path("app/temp_import/{$book->id}_{$order}.mp3");

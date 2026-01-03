@@ -27,19 +27,20 @@ class ABookImportController extends Controller
         $bookDirs = $disk->directories('incoming');
         $importList = [];
         
-        // 🔥 ЗМІНА 1: Змінна для пошуку активного імпорту
+        // Змінна для збереження активного імпорту (якщо сторінку оновили)
         $activeImport = null;
 
         foreach ($bookDirs as $bookPath) {
             $folderName = basename($bookPath);
+            // Пропускаємо саму папку incoming, якщо вона потрапила в список
             if ($folderName === 'incoming') continue;
 
-            // 🔥 ЗМІНА 2: Перевіряємо, чи йде зараз процес по цій папці
-            // Генеруємо той самий ключ, що і в Job
+            // 1. Перевіряємо, чи йде зараз процес по цій папці
+            // Генеруємо той самий ключ, що і в Job: 'import_progress_' + md5($path)
             $progressKey = 'import_progress_' . md5($bookPath);
             $currentProgress = Cache::get($progressKey);
 
-            // Якщо в кеші є запис і він менше 100% — значить процес йде!
+            // Якщо в кеші є запис і він менше 100 — значить процес йде!
             if ($currentProgress !== null && $currentProgress < 100) {
                 $activeImport = [
                     'path' => $bookPath,
@@ -47,10 +48,12 @@ class ABookImportController extends Controller
                 ];
             }
 
+            // Парсимо назву папки: Автор_НазваКниги
             $parts = explode('_', $folderName, 2);
             $authorName = count($parts) === 2 ? trim($parts[0]) : 'Невідомий';
             $bookTitle = count($parts) === 2 ? trim($parts[1]) : trim($folderName);
 
+            // Перевіряємо вміст
             $allFiles = $disk->allFiles($bookPath);
             $mp3Count = collect($allFiles)->filter(fn($f) => Str::lower(pathinfo($f, PATHINFO_EXTENSION)) === 'mp3')->count();
             $hasCover = collect($allFiles)->contains(fn($f) => in_array(Str::lower(pathinfo($f, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png']));
@@ -66,7 +69,7 @@ class ABookImportController extends Controller
             }
         }
 
-        // 🔥 ЗМІНА 3: Передаємо $activeImport у шаблон
+        // Передаємо $activeImport у шаблон, щоб JS знав, яку смужку відкрити
         return view('admin.abooks.bulk_upload', compact('importList', 'activeImport'));
     }
 
@@ -98,6 +101,7 @@ class ABookImportController extends Controller
     {
         $path = $request->input('path');
         
+        // Ключ повинен співпадати з тим, що в Job
         $key = 'import_progress_' . md5($path);
         
         // Беремо значення з кешу (якщо нема — 0)
@@ -114,8 +118,11 @@ class ABookImportController extends Controller
         $folderPath = $request->input('folder_path');
         
         if ($folderPath) {
+            // Створюємо ключ скасування, який перевіряє Job
+            // Час життя ключа — 2 хвилини, цього достатньо, щоб Job його помітив
             $key = 'import_cancel_' . md5($folderPath);
             Cache::put($key, true, 120); 
+            
             Log::info("Користувач запросив скасування імпорту для: {$folderPath}");
         }
 
