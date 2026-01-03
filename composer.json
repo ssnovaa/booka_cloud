@@ -13,7 +13,7 @@
         "google/apiclient-services": "0.419",
         "google/auth": "1.42",
         "guzzlehttp/guzzle": "7.9",
-        "intervention/image": "^3.11",
+        "intervention/image": "*",
         "intervention/image-laravel": "*",
         "james-heinrich/getid3": "^1.9",
         "laravel/framework": "^12.0",
