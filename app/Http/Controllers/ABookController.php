@@ -128,9 +128,17 @@ class ABookController extends Controller
         $getID3 = new getID3();
         $totalSeconds = 0;
 
-        foreach ($request->file('audio_files') as $index => $audioFile) {
+        // 🔥 СОРТУВАННЯ ФАЙЛІВ ПЕРЕД ОБРОБКОЮ
+        // Це гарантує, що 01.mp3 буде першим, а 10.mp3 десятим, незалежно від порядку завантаження
+        $files = $request->file('audio_files');
+        usort($files, function ($a, $b) {
+            return strnatcmp($a->getClientOriginalName(), $b->getClientOriginalName());
+        });
+
+        foreach ($files as $index => $audioFile) {
             $chapterIndex = $index + 1;
             $tempPath = $audioFile->getRealPath();
+            $originalName = $audioFile->getClientOriginalName();
             
             // Аналіз тривалості
             $fileInfo = $getID3->analyze($tempPath);
@@ -152,10 +160,10 @@ class ABookController extends Controller
 
             // Завантажуємо всі файли з тимчасової папки в R2
             if (file_exists($localPlaylistPath)) {
-                $files = scandir($localHlsFolder);
+                $filesInFolder = scandir($localHlsFolder);
                 $cloudFolder = "audio/hls/{$book->id}/{$chapterIndex}";
                 
-                foreach ($files as $file) {
+                foreach ($filesInFolder as $file) {
                     if ($file === '.' || $file === '..') continue;
                     $cloudPath = "{$cloudFolder}/{$file}";
                     Storage::disk('s3_private')->put($cloudPath, fopen("{$localHlsFolder}/{$file}", 'r+'));
@@ -165,9 +173,12 @@ class ABookController extends Controller
                 array_map('unlink', glob("{$localHlsFolder}/*.*"));
                 rmdir($localHlsFolder);
 
+                // Назва глави з імені файлу (без розширення)
+                $chapterTitle = pathinfo($originalName, PATHINFO_FILENAME);
+
                 AChapter::create([
                     'a_book_id' => $book->id,
-                    'title' => 'Глава ' . $chapterIndex,
+                    'title' => $chapterTitle, // Використовуємо реальну назву файлу
                     'order' => $chapterIndex,
                     'audio_path' => "{$cloudFolder}/{$playlistName}",
                     'duration' => $duration,
@@ -178,7 +189,7 @@ class ABookController extends Controller
         // Оновлюємо тривалість книги в хвилинах
         $book->update(['duration' => (int) round($totalSeconds / 60)]);
 
-        return redirect('/abooks')->with('success', 'Книгу успішно додано та конвертовано в HLS!');
+        return redirect('/admin/abooks')->with('success', 'Книгу успішно додано та конвертовано в HLS!');
     }
 
     // Форма редагування
@@ -265,6 +276,7 @@ class ABookController extends Controller
         $book->chapters()->each(function ($chapter) {
             if ($chapter->audio_path) {
                 if (str_ends_with($chapter->audio_path, '.m3u8')) {
+                    // Видаляємо папку з сегментами
                     Storage::disk('s3_private')->deleteDirectory(dirname($chapter->audio_path));
                 } else {
                     Storage::disk('s3_private')->delete($chapter->audio_path);
