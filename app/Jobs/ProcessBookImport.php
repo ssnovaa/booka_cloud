@@ -25,18 +25,17 @@ class ProcessBookImport implements ShouldQueue
 
     protected $folderPath;
     protected $progressKey;
-    protected $cancelKey; // 🔥 Додано
+    protected $cancelKey;
 
     public function __construct($folderPath)
     {
         $this->folderPath = $folderPath;
         $this->progressKey = 'import_progress_' . md5($folderPath);
-        $this->cancelKey = 'import_cancel_' . md5($folderPath); // 🔥 Ключ для скасування
+        $this->cancelKey = 'import_cancel_' . md5($folderPath);
     }
 
     public function handle()
     {
-        // Очищаємо прапор скасування на старті, щоб не скасувати нову задачу старим кліком
         Cache::forget($this->cancelKey);
 
         $diskPrivate = Storage::disk('s3_private');
@@ -91,28 +90,22 @@ class ProcessBookImport implements ShouldQueue
         $totalFiles = count($mp3Files);
 
         foreach ($mp3Files as $file) {
-            // 🔥 ПЕРЕВІРКА СКАСУВАННЯ
             if (Cache::has($this->cancelKey)) {
                 Log::info("🛑 Import CANCELLED by user: {$bookTitle}");
-                
-                // Видаляємо записи з БД
                 $book->chapters()->delete();
                 $book->delete();
-
-                // Видаляємо обкладинки з хмари (опціонально, але бажано)
                 if ($coverUrl) $diskPublic->delete($coverUrl);
                 if ($thumbUrl) $diskPublic->delete($thumbUrl);
-
-                // Скидаємо прогрес
                 Cache::forget($this->progressKey);
                 Cache::forget($this->cancelKey);
-
-                return; // ⛔ ЗУПИНЯЄМО РОБОТУ
+                return;
             }
 
             $progress = round((($order - 1) / $totalFiles) * 100);
-			// 🔥 ОТЛАДКА: Пишем в лог
-			Log::info("JOB DEBUG: Writing Progress. Key: {$this->progressKey}, Value: {$progress}%");
+            
+            // 🔥 ЛОГ ДЛЯ ВІДЛАДКИ (Пишемо в файл, щоб перевірити через роут)
+            Log::info("JOB [{$this->progressKey}]: Прогресс {$progress}%. Обробка файлу: " . basename($file));
+            
             Cache::put($this->progressKey, $progress, 3600);
 
             $localTemp = storage_path("app/temp_import/{$book->id}_{$order}.mp3");
@@ -129,7 +122,6 @@ class ProcessBookImport implements ShouldQueue
             $cmd = "ffmpeg -i ".escapeshellarg($localTemp)." -c:a libmp3lame -b:a 128k -f hls -hls_time 10 -hls_list_size 0 -hls_segment_filename ".escapeshellarg("$hlsFolder/seg_%03d.ts")." ".escapeshellarg("$hlsFolder/index.m3u8")." 2>&1";
             shell_exec($cmd);
 
-            // Ще одна перевірка після довгого ffmpeg
             if (Cache::has($this->cancelKey)) {
                 @unlink($localTemp);
                 array_map('unlink', glob("$hlsFolder/*.*"));
