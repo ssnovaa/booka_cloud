@@ -16,12 +16,15 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 use Intervention\Image\Laravel\Facades\Image;
 use getID3;
+// 🔥 ДОБАВЛЯЕМ ИМПОРТ PROCESS
+use Symfony\Component\Process\Process;
+use Symfony\Component\Process\Exception\ProcessFailedException;
 
 class ProcessBookImport implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 3600;
+    public $timeout = 7200; // 2 часа (на всякий случай)
 
     protected $folderPath;
     protected $progressKey;
@@ -36,13 +39,11 @@ class ProcessBookImport implements ShouldQueue
 
     public function handle()
     {
-        // 🔥 Пишемо в консоль примусово, щоб ви побачили це в Railway
         Log::channel('stderr')->info("🚀 JOB STARTED: Починаю обробку папки: " . $this->folderPath);
 
         try {
             Cache::forget($this->cancelKey);
 
-            // Перевірка підключення до дисків
             $diskPrivate = Storage::disk('s3_private');
             $diskPublic = Storage::disk('s3');
 
@@ -102,29 +103,23 @@ class ProcessBookImport implements ShouldQueue
             $order = 1;
             $totalFiles = count($mp3Files);
 
-            foreach ($mp3Files as $file) {
-                if (Cache::has($this->cancelKey)) {
-                    Log::channel('stderr')->info("🛑 Import CANCELLED by user: {$bookTitle}");
-                    $book->chapters()->delete();
-                    $book->delete();
-                    if ($coverUrl) $diskPublic->delete($coverUrl);
-                    if ($thumbUrl) $diskPublic->delete($thumbUrl);
-                    Cache::forget($this->progressKey);
-                    Cache::forget($this->cancelKey);
-                    return;
-                }
+            // Старт (1%)
+            Cache::put($this->progressKey, ['percent' => 1, 'time' => time()], 3600);
 
-                $progress = round((($order - 1) / $totalFiles) * 100);
+            foreach ($mp3Files as $file) {
+                // Перевірка скасування ПЕРЕД файлом
+                if ($this->checkIfCancelled($book, $coverUrl, $thumbUrl, $diskPublic)) return;
+
+                $progress = round(($order / $totalFiles) * 100);
+                if ($progress == 0) $progress = 1; 
                 
-                // 🔥 Лог прогресу в консоль
                 Log::channel('stderr')->info("JOB [{$this->progressKey}]: Прогрес {$progress}%. Файл: " . basename($file));
                 
-                Cache::put($this->progressKey, $progress, 3600);
+                // Оновлюємо статус перед початком важкої роботи
+                Cache::put($this->progressKey, ['percent' => $progress, 'time' => time()], 3600);
 
                 $localTemp = storage_path("app/temp_import/{$book->id}_{$order}.mp3");
                 @mkdir(dirname($localTemp), 0777, true);
-                
-                // Завантаження файлу
                 file_put_contents($localTemp, $diskPrivate->get($file));
 
                 $info = $getID3->analyze($localTemp);
@@ -134,9 +129,36 @@ class ProcessBookImport implements ShouldQueue
                 $hlsFolder = storage_path("app/temp_hls/{$book->id}/{$order}");
                 @mkdir($hlsFolder, 0777, true);
 
-                // Конвертація
+                // 🔥 НОВА ЛОГІКА: ЗАПУСК FFmpeg ЧЕРЕЗ PROCESS
                 $cmd = "ffmpeg -i ".escapeshellarg($localTemp)." -c:a libmp3lame -b:a 128k -f hls -hls_time 10 -hls_list_size 0 -hls_segment_filename ".escapeshellarg("$hlsFolder/seg_%03d.ts")." ".escapeshellarg("$hlsFolder/index.m3u8")." 2>&1";
-                shell_exec($cmd);
+                
+                // Запускаємо процес
+                $process = Process::fromShellCommandline($cmd);
+                $process->setTimeout(3600); // 1 година на один файл
+                $process->start();
+
+                // 🔥 ЦИКЛ ОЧІКУВАННЯ (Heartbeat)
+                // Поки ffmpeg працює, ми кожні 2 секунди оновлюємо час в кеші
+                while ($process->isRunning()) {
+                    // Оновлюємо "пульс"
+                    Cache::put($this->progressKey, ['percent' => $progress, 'time' => time()], 3600);
+                    
+                    // Перевіряємо скасування ПІД ЧАС обробки файлу
+                    if ($this->checkIfCancelled($book, $coverUrl, $thumbUrl, $diskPublic)) {
+                        $process->stop(); // Вбиваємо ffmpeg
+                        @unlink($localTemp);
+                        array_map('unlink', glob("$hlsFolder/*.*"));
+                        @rmdir($hlsFolder);
+                        return;
+                    }
+
+                    sleep(2); // Чекаємо 2 секунди перед наступною перевіркою
+                }
+
+                // Перевірка результату ffmpeg
+                if (!$process->isSuccessful()) {
+                    Log::channel('stderr')->error("JOB FFmpeg Error: " . $process->getErrorOutput());
+                }
 
                 if (file_exists("$hlsFolder/index.m3u8")) {
                     foreach (scandir($hlsFolder) as $f) {
@@ -150,8 +172,6 @@ class ProcessBookImport implements ShouldQueue
                         'audio_path' => "audio/hls/{$book->id}/{$order}/index.m3u8",
                         'duration' => $duration
                     ]);
-                } else {
-                     Log::channel('stderr')->error("JOB ERROR: ffmpeg не створив файли для " . basename($file));
                 }
 
                 @unlink($localTemp);
@@ -161,17 +181,31 @@ class ProcessBookImport implements ShouldQueue
             }
 
             $book->update(['duration' => (int) round($totalSeconds / 60)]);
-            Cache::put($this->progressKey, 100, 3600);
+            
+            Cache::put($this->progressKey, ['percent' => 100, 'time' => time()], 3600);
             Log::channel('stderr')->info("✅ JOB DONE: Імпорт завершено успішно!");
 
         } catch (\Throwable $e) {
-            // 🔥 ЦЕ НАЙВАЖЛИВІШЕ: Вивід помилки в логи
             Log::channel('stderr')->error("🔥 JOB CRASHED: " . $e->getMessage());
-            Log::channel('stderr')->error($e->getTraceAsString());
             
-            // Записуємо помилку в кеш, щоб контролер побачив
-            Cache::put($this->progressKey, -1, 300);
+            Cache::put($this->progressKey, ['percent' => -1, 'time' => time()], 300);
             throw $e;
         }
+    }
+
+    // Допоміжна функція для перевірки скасування
+    private function checkIfCancelled($book, $cover, $thumb, $diskPublic)
+    {
+        if (Cache::has($this->cancelKey)) {
+            Log::channel('stderr')->info("🛑 Import CANCELLED by user.");
+            $book->chapters()->delete();
+            $book->delete();
+            if ($cover) $diskPublic->delete($cover);
+            if ($thumb) $diskPublic->delete($thumb);
+            Cache::forget($this->progressKey);
+            Cache::forget($this->cancelKey);
+            return true;
+        }
+        return false;
     }
 }
