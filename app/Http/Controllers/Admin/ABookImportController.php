@@ -9,6 +9,9 @@ use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
 use App\Jobs\ProcessBookImport;
+// 🔥 ДОДАЄМО МОДЕЛІ
+use App\Models\Author;
+use App\Models\ABook;
 
 class ABookImportController extends Controller
 {
@@ -29,8 +32,6 @@ class ABookImportController extends Controller
             if ($folderName === 'incoming') continue;
 
             $progressKey = 'import_progress_' . md5($bookPath);
-            
-            // 🔥 ЧИТАЄМО ПРИМУСОВО З БАЗИ
             $cachedData = Cache::store('database')->get($progressKey);
 
             $progress = 0;
@@ -53,6 +54,16 @@ class ABookImportController extends Controller
             $authorName = count($parts) === 2 ? trim($parts[0]) : 'Невідомий';
             $bookTitle = count($parts) === 2 ? trim($parts[1]) : trim($folderName);
 
+            // 🔥 ПЕРЕВІРКА В БАЗІ ДАНИХ
+            $isDuplicate = false;
+            $author = Author::where('name', $authorName)->first();
+            if ($author) {
+                // Якщо автор є, шукаємо у нього цю книгу
+                $isDuplicate = ABook::where('author_id', $author->id)
+                    ->where('title', $bookTitle)
+                    ->exists();
+            }
+
             $allFiles = $disk->allFiles($bookPath);
             $mp3Count = collect($allFiles)->filter(fn($f) => Str::lower(pathinfo($f, PATHINFO_EXTENSION)) === 'mp3')->count();
             $hasCover = collect($allFiles)->contains(fn($f) => in_array(Str::lower(pathinfo($f, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png']));
@@ -63,7 +74,8 @@ class ABookImportController extends Controller
                     'title'    => $bookTitle,
                     'path'     => $bookPath,
                     'files'    => $mp3Count,
-                    'hasCover' => $hasCover
+                    'hasCover' => $hasCover,
+                    'isDuplicate' => $isDuplicate // 🔥 Передаємо статус у View
                 ];
             }
         }
@@ -71,15 +83,12 @@ class ABookImportController extends Controller
         return view('admin.abooks.bulk_upload', compact('importList', 'activeImport'));
     }
 
+    // ... (решта методів import, checkProgress, cancelImport залишаються БЕЗ ЗМІН) ...
     public function import(Request $request)
     {
         $folderPath = $request->input('folder_path');
+        if (!$folderPath) return back()->with('error', 'Шлях до папки порожній.');
 
-        if (!$folderPath) {
-            return back()->with('error', 'Шлях до папки порожній.');
-        }
-
-        // 🔥 ПЕРЕВІРКА: ЧИ ВЖЕ ЙДЕ ІМПОРТ?
         $progressKey = 'import_progress_' . md5($folderPath);
         $existing = Cache::store('database')->get($progressKey);
         
@@ -88,7 +97,7 @@ class ABookImportController extends Controller
         elseif (is_numeric($existing)) $progress = $existing;
 
         if ($progress > 0 && $progress < 100) {
-            return back()->with('error', 'Імпорт цієї книги вже виконується! Зачекайте завершення.');
+            return back()->with('error', 'Імпорт цієї книги вже виконується!');
         }
 
         ProcessBookImport::dispatch($folderPath);
@@ -103,8 +112,6 @@ class ABookImportController extends Controller
     {
         $path = $request->input('path');
         $key = 'import_progress_' . md5($path);
-        
-        // 🔥 ЧИТАЄМО ПРИМУСОВО З БАЗИ
         $data = Cache::store('database')->get($key);
         
         $progress = 0;
@@ -119,11 +126,9 @@ class ABookImportController extends Controller
             $lastUpdate = time(); 
         }
 
-        // 1.5 хвилини тиші = stuck
         if ($progress < 100 && (time() - $lastUpdate > 90)) {
             $status = 'stuck';
         }
-
         if ($progress == -1) {
             $status = 'error';
         }
@@ -138,14 +143,11 @@ class ABookImportController extends Controller
     public function cancelImport(Request $request)
     {
         $folderPath = $request->input('folder_path');
-        
         if ($folderPath) {
             $key = 'import_cancel_' . md5($folderPath);
-            // 🔥 ПИШЕМО ВІДМІНУ В БАЗУ
             Cache::store('database')->put($key, true, 120); 
             Log::info("Користувач запросив скасування імпорту для: {$folderPath}");
         }
-
         return response()->json(['status' => 'cancelled']);
     }
 }

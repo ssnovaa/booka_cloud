@@ -40,12 +40,21 @@
                                     $rowId = md5($item['path']); 
                                     // Проверяем, активна ли эта книга (передано из контроллера)
                                     $isProcessing = isset($activeImport) && $activeImport['path'] === $item['path'];
+                                    // Проверка на дубликат (передано из контроллера)
+                                    $isDuplicate = $item['isDuplicate']; 
                                 @endphp
 
                                 {{-- ОСНОВНАЯ СТРОКА --}}
                                 <tr id="row-main-{{ $rowId }}" class="{{ $isProcessing ? 'bg-blue-50' : '' }}">
                                     <td class="px-6 py-4 whitespace-nowrap font-medium">{{ $item['author'] }}</td>
-                                    <td class="px-6 py-4 whitespace-nowrap">{{ $item['title'] }}</td>
+                                    <td class="px-6 py-4 whitespace-nowrap">
+                                        {{ $item['title'] }}
+                                        @if($isDuplicate)
+                                            <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                                Вже в базі
+                                            </span>
+                                        @endif
+                                    </td>
                                     <td class="px-6 py-4 whitespace-nowrap">{{ $item['files'] }} MP3</td>
                                     <td class="px-6 py-4 whitespace-nowrap">
                                         @if($item['hasCover'])
@@ -55,14 +64,25 @@
                                         @endif
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-right">
-                                        {{-- Кнопка Импорт --}}
-                                        <form action="{{ route('admin.abooks.import') }}" method="POST" class="{{ $isProcessing ? 'hidden' : '' }}" id="form-{{ $rowId }}">
-                                            @csrf
-                                            <input type="hidden" name="folder_path" value="{{ $item['path'] }}">
-                                            <button type="submit" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded text-xs uppercase tracking-widest">
-                                                Імпорт
+                                        
+                                        {{-- ЛОГИКА КНОПКИ --}}
+                                        @if($isDuplicate && !$isProcessing)
+                                            {{-- Кнопка для существующей книги (неактивная) --}}
+                                            <button type="button" disabled 
+                                                    class="bg-gray-300 text-gray-500 font-bold py-2 px-4 rounded text-xs uppercase tracking-widest opacity-50 cursor-not-allowed"
+                                                    title="Ця книга вже імпортована">
+                                                Вже є
                                             </button>
-                                        </form>
+                                        @else
+                                            {{-- Кнопка Импорт (активная или скрытая если идет процесс) --}}
+                                            <form action="{{ route('admin.abooks.import') }}" method="POST" class="{{ $isProcessing ? 'hidden' : '' }}" id="form-{{ $rowId }}">
+                                                @csrf
+                                                <input type="hidden" name="folder_path" value="{{ $item['path'] }}">
+                                                <button type="submit" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded text-xs uppercase tracking-widest">
+                                                    Імпорт
+                                                </button>
+                                            </form>
+                                        @endif
 
                                         {{-- Бейдж статуса --}}
                                         <div id="status-badge-{{ $rowId }}" class="{{ $isProcessing ? '' : 'hidden' }}">
@@ -71,7 +91,7 @@
                                     </td>
                                 </tr>
 
-                                {{-- СТРОКА ПРОГРЕССА (Скрытая) --}}
+                                {{-- СТРОКА ПРОГРЕССА (Скрытая по умолчанию, открывается JS) --}}
                                 <tr id="row-progress-{{ $rowId }}" class="{{ $isProcessing ? '' : 'hidden' }} bg-gray-50 shadow-inner">
                                     <td colspan="5" class="px-6 py-4">
                                         <div class="flex items-center justify-between">
@@ -154,13 +174,44 @@
                 .then(response => response.json())
                 .then(data => {
                     const percent = data.progress;
+                    const status = data.status; // 'processing', 'stuck', 'error'
                     
                     // Обновляем полоску
                     if (progressBar) progressBar.style.width = percent + '%';
                     if (progressPercent) progressPercent.innerText = percent + '%';
-                    if (progressText) progressText.innerText = `Обробка: ${percent}%`;
+                    
+                    if (progressText) {
+                        progressText.innerText = `Обробка: ${percent}%`;
+                        progressText.classList.remove('text-red-600');
+                    }
 
-                    // Если 100% — успех
+                    // 🔥 ВОРКЕР ПОМЕР (STUCK) - больше 90 сек тишины
+                    if (status === 'stuck') {
+                        clearInterval(interval);
+                        if(progressBar) {
+                            progressBar.classList.remove('bg-blue-600');
+                            progressBar.classList.add('bg-red-500'); // Червона полоска
+                        }
+                        if(progressText) {
+                            progressText.innerText = "Помилка: процес завис або воркер перезавантажився.";
+                            progressText.classList.add('text-red-600', 'font-bold');
+                        }
+                        if(btnCancel) {
+                            btnCancel.innerText = "Закрити"; // Змінюємо кнопку на "Закрити"
+                            btnCancel.onclick = function() { window.location.reload(); };
+                        }
+                        return;
+                    }
+
+                    // ПОМИЛКА В КОДІ (ERROR -1)
+                    if (status === 'error' || percent === -1) {
+                        clearInterval(interval);
+                        if(progressBar) progressBar.classList.add('bg-red-500');
+                        if(progressText) progressText.innerText = "Критична помилка імпорту!";
+                        return;
+                    }
+
+                    // УСПІХ
                     if (percent >= 100) {
                         clearInterval(interval);
                         
@@ -172,7 +223,7 @@
                             progressText.innerText = "Успішно імпортовано!";
                             progressText.classList.add('text-green-600');
                         }
-                        if(btnCancel) btnCancel.classList.add('hidden'); // Убираем кнопку Стоп
+                        if(btnCancel) btnCancel.classList.add('hidden'); 
                         
                         // Перезагрузка через 2 секунды
                         setTimeout(() => {
@@ -183,7 +234,7 @@
                 .catch(err => {
                     console.error("Помилка:", err);
                 });
-        }, 10000); // <--- ВАЖНО: 10 секунд (10000 мс)
+        }, 10000); // <--- 10 секунд интервал
     }
 
     function cancelImport(folderPath, rowId) {
