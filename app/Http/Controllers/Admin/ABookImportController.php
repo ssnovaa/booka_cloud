@@ -12,9 +12,6 @@ use App\Jobs\ProcessBookImport;
 
 class ABookImportController extends Controller
 {
-    /**
-     * Сторінка зі списком папок для імпорту (R2/S3)
-     */
     public function bulkUploadView()
     {
         $disk = Storage::disk('s3_private');
@@ -31,11 +28,11 @@ class ABookImportController extends Controller
             $folderName = basename($bookPath);
             if ($folderName === 'incoming') continue;
 
-            // Генеруємо ключ прогресу
             $progressKey = 'import_progress_' . md5($bookPath);
-            $cachedData = Cache::get($progressKey);
+            
+            // 🔥 ЧИТАЄМО ПРИМУСОВО З БАЗИ
+            $cachedData = Cache::store('database')->get($progressKey);
 
-            // 🔥 ВИПРАВЛЕННЯ: Правильно читаємо дані (число або масив)
             $progress = 0;
             if ($cachedData !== null) {
                 if (is_array($cachedData)) {
@@ -45,7 +42,6 @@ class ABookImportController extends Controller
                 }
             }
 
-            // Якщо прогрес > 0 і < 100, значить процес активний
             if ($progress > 0 && $progress < 100) {
                 $activeImport = [
                     'path' => $bookPath,
@@ -53,7 +49,6 @@ class ABookImportController extends Controller
                 ];
             }
 
-            // Парсимо назву та інформацію про файли
             $parts = explode('_', $folderName, 2);
             $authorName = count($parts) === 2 ? trim($parts[0]) : 'Невідомий';
             $bookTitle = count($parts) === 2 ? trim($parts[1]) : trim($folderName);
@@ -76,15 +71,24 @@ class ABookImportController extends Controller
         return view('admin.abooks.bulk_upload', compact('importList', 'activeImport'));
     }
 
-    /**
-     * Запуск імпорту (створення Job)
-     */
     public function import(Request $request)
     {
         $folderPath = $request->input('folder_path');
 
         if (!$folderPath) {
             return back()->with('error', 'Шлях до папки порожній.');
+        }
+
+        // 🔥 ПЕРЕВІРКА: ЧИ ВЖЕ ЙДЕ ІМПОРТ?
+        $progressKey = 'import_progress_' . md5($folderPath);
+        $existing = Cache::store('database')->get($progressKey);
+        
+        $progress = 0;
+        if (is_array($existing)) $progress = $existing['percent'] ?? 0;
+        elseif (is_numeric($existing)) $progress = $existing;
+
+        if ($progress > 0 && $progress < 100) {
+            return back()->with('error', 'Імпорт цієї книги вже виконується! Зачекайте завершення.');
         }
 
         ProcessBookImport::dispatch($folderPath);
@@ -95,21 +99,18 @@ class ABookImportController extends Controller
         ]);
     }
 
-    /**
-     * API для перевірки прогресу (викликається через JS fetch)
-     */
     public function checkProgress(Request $request)
     {
         $path = $request->input('path');
         $key = 'import_progress_' . md5($path);
         
-        $data = Cache::get($key);
+        // 🔥 ЧИТАЄМО ПРИМУСОВО З БАЗИ
+        $data = Cache::store('database')->get($key);
         
         $progress = 0;
         $lastUpdate = time();
         $status = 'processing';
 
-        // Розбираємо, що прийшло (старий формат - число, новий - масив)
         if (is_array($data)) {
             $progress = $data['percent'] ?? 0;
             $lastUpdate = $data['time'] ?? time();
@@ -118,7 +119,7 @@ class ABookImportController extends Controller
             $lastUpdate = time(); 
         }
 
-        // Перевірка на "зависання" (1.5 хвилини тиші)
+        // 1.5 хвилини тиші = stuck
         if ($progress < 100 && (time() - $lastUpdate > 90)) {
             $status = 'stuck';
         }
@@ -127,9 +128,6 @@ class ABookImportController extends Controller
             $status = 'error';
         }
 
-        // Логуємо для налагодження
-        // Log::info("WEB [CheckProgress]: Ключ '{$key}'. Прогрес: {$progress}%. Status: {$status}");
-
         return response()->json([
             'progress' => $progress,
             'status' => $status,
@@ -137,16 +135,14 @@ class ABookImportController extends Controller
         ]);
     }
 
-    /**
-     * API для скасування імпорту
-     */
     public function cancelImport(Request $request)
     {
         $folderPath = $request->input('folder_path');
         
         if ($folderPath) {
             $key = 'import_cancel_' . md5($folderPath);
-            Cache::put($key, true, 120); 
+            // 🔥 ПИШЕМО ВІДМІНУ В БАЗУ
+            Cache::store('database')->put($key, true, 120); 
             Log::info("Користувач запросив скасування імпорту для: {$folderPath}");
         }
 
